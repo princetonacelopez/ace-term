@@ -374,12 +374,6 @@ impl TerminalCanvasView {
             .last_title
             .clone()
             .unwrap_or_else(|| "Shell".to_string());
-        let has_selection = self
-            .vt
-            .lock()
-            .expect("vt lock poisoned")
-            .selection_text()
-            .is_some_and(|s| !s.is_empty());
 
         div()
             .h(px(TOP_BAR_HEIGHT))
@@ -419,27 +413,6 @@ impl TerminalCanvasView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(top_bar_button(
-                        "copy-btn",
-                        "Copy",
-                        has_selection,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.copy_selection(cx)),
-                    ))
-                    .child(top_bar_button(
-                        "paste-btn",
-                        "Paste",
-                        true,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.paste_clipboard(cx)),
-                    ))
-                    .child(top_bar_button(
-                        "clear-btn",
-                        "Clear",
-                        true,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.clear_terminal(cx)),
-                    ))
                     .child(top_bar_button(
                         "settings-btn",
                         if self.settings_open {
