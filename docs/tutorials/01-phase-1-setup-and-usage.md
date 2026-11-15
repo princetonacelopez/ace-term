@@ -59,8 +59,8 @@ scrollback_lines = 10000
 cursor_style = "block"      # "block" | "bar" | "underline"
 
 [ai]
-provider = "anthropic"      # "anthropic" | "openai"
-model = "claude-sonnet-4-6"
+provider = "antigravity"    # "antigravity" | "ollama" | "lmstudio" | "anthropic" | "openai"
+model = "gemini-4-argon-medium"
 base_url = ""               # Optional OpenAI-compatible endpoint
 approval_mode = "default"   # "default" | "auto"
 auto_intercept = true

@@ -1,9 +1,11 @@
 //! Streaming AI agent orchestrator, built-in tools, and unified diff generation.
 
 pub mod diff;
+pub mod discovery;
 pub mod tools;
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use ace_config::secrets::{load_api_key, scrub_secrets};
 use ace_config::{AceConfig, ApprovalMode};
@@ -12,9 +14,11 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
+pub use discovery::{DiscoveredModel, DiscoveredProvider, discover_local_ai, is_local_provider};
 pub use tools::{PendingApproval, ToolSpec, builtin_tool_specs, execute_approved};
 
 const MAX_TOOL_TURNS: usize = 8;
@@ -96,17 +100,25 @@ pub async fn run_agent_turn(
     let system_prompt = build_system_prompt(&env);
 
     let provider = cfg.ai.provider.to_ascii_lowercase();
-    let api_key = if provider == "ollama" {
+    let api_key = if is_local_provider(&provider) {
         None
     } else {
+        let env_var = if provider == "anthropic" {
+            "ANTHROPIC_API_KEY"
+        } else {
+            "OPENAI_API_KEY"
+        };
         match load_api_key(&provider) {
             Ok(Some(k)) => Some(k),
-            Ok(None) => {
-                let _ = events.send(AgentEvent::Error(
-                    AgentError::MissingApiKey(cfg.ai.provider.clone()).to_string(),
-                ));
-                return;
-            }
+            Ok(None) => match std::env::var(env_var) {
+                Ok(k) if !k.trim().is_empty() => Some(k),
+                _ => {
+                    let _ = events.send(AgentEvent::Error(
+                        AgentError::MissingApiKey(cfg.ai.provider.clone()).to_string(),
+                    ));
+                    return;
+                }
+            },
             Err(err) => {
                 let _ = events.send(AgentEvent::Error(err.to_string()));
                 return;
@@ -115,7 +127,17 @@ pub async fn run_agent_turn(
     };
 
     let client = reqwest::Client::new();
-    let result = if provider == "anthropic" {
+    let result = if provider == "antigravity" {
+        run_antigravity_loop(
+            &cfg,
+            &system_prompt,
+            &history,
+            &scrubbed_prompt,
+            &cwd,
+            &events,
+        )
+        .await
+    } else if provider == "anthropic" {
         run_anthropic_loop(
             &client,
             api_key.as_deref().unwrap_or_default(),
@@ -159,6 +181,130 @@ fn build_system_prompt(env: &EnvSnapshot) -> String {
          Workspace context: {}",
         env.prompt_summary()
     )
+}
+
+async fn run_antigravity_loop(
+    cfg: &AceConfig,
+    system_prompt: &str,
+    history: &[ChatMessage],
+    prompt: &str,
+    cwd: &Path,
+    events: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<(), AgentError> {
+    let agy_bin = discovery::find_binary("agy").ok_or_else(|| AgentError::Provider {
+        status: 404,
+        body: "Antigravity CLI (`agy`) was not found on PATH".to_string(),
+    })?;
+
+    let mut full_prompt = String::new();
+    full_prompt.push_str(system_prompt);
+    full_prompt.push_str("\n\n");
+    for msg in history {
+        full_prompt.push_str(&format!("{}: {}\n", msg.role, msg.content));
+    }
+    full_prompt.push_str(&format!("user: {prompt}"));
+
+    let mut cmd = tokio::process::Command::new(agy_bin);
+    cmd.current_dir(cwd)
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--disable-slash-commands")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if !cfg.ai.model.trim().is_empty() {
+        cmd.arg("--model").arg(cfg.ai.model.trim());
+    }
+    if cfg.ai.approval_mode == ApprovalMode::Auto {
+        cmd.arg("--mode=auto");
+    } else {
+        cmd.arg("--mode=accept-edits");
+    }
+    cmd.arg(format!("-p={full_prompt}"));
+
+    let mut child = cmd.spawn().map_err(|e| AgentError::Provider {
+        status: 500,
+        body: format!("failed to spawn agy: {e}"),
+    })?;
+
+    let stdout = child.stdout.take().ok_or_else(|| AgentError::Provider {
+        status: 500,
+        body: "agy stdout pipe unavailable".to_string(),
+    })?;
+    let stderr = child.stderr.take();
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut emitted_text = false;
+    let mut final_error: Option<String> = None;
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        match json.get("event").and_then(|v| v.as_str()) {
+            Some("step_update") => {
+                if let Some(su) = json.get("step_update")
+                    && let Some(delta) = su.get("text_delta").and_then(|v| v.as_str())
+                    && !delta.is_empty()
+                {
+                    emitted_text = true;
+                    let _ = events.send(AgentEvent::Token(delta.to_string()));
+                }
+            }
+            Some("result") => {
+                if let Some(res) = json.get("result") {
+                    let status = res.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    if status != "SUCCESS" && !status.is_empty() {
+                        let msg = res
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("agy turn failed");
+                        final_error = Some(msg.to_string());
+                    } else if !emitted_text
+                        && let Some(resp) = res.get("response").and_then(|v| v.as_str())
+                        && !resp.is_empty()
+                    {
+                        let _ = events.send(AgentEvent::Token(resp.to_string()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| AgentError::Provider {
+        status: 500,
+        body: format!("failed waiting on agy: {e}"),
+    })?;
+
+    if let Some(err) = final_error {
+        return Err(AgentError::Provider {
+            status: 500,
+            body: err,
+        });
+    }
+
+    if !status.success() {
+        let mut err_text = String::new();
+        if let Some(mut se) = stderr {
+            use tokio::io::AsyncReadExt;
+            let _ = se.read_to_string(&mut err_text).await;
+        }
+        return Err(AgentError::Provider {
+            status: status.code().unwrap_or(1) as u16,
+            body: if err_text.trim().is_empty() {
+                "agy exited with non-zero status".to_string()
+            } else {
+                err_text.trim().to_string()
+            },
+        });
+    }
+
+    Ok(())
 }
 
 async fn resolve_tool_call(
@@ -454,6 +600,8 @@ async fn run_openai_loop(
         cfg.ai.base_url.trim_end_matches('/')
     } else if cfg.ai.provider.eq_ignore_ascii_case("ollama") {
         "http://127.0.0.1:11434"
+    } else if cfg.ai.provider.eq_ignore_ascii_case("lmstudio") {
+        "http://127.0.0.1:1234"
     } else {
         "https://api.openai.com"
     };

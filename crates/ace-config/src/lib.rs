@@ -94,8 +94,8 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            provider: "antigravity".to_string(),
+            model: "gemini-4-argon-medium".to_string(),
             base_url: String::new(),
             approval_mode: ApprovalMode::Default,
             auto_intercept: true,
@@ -355,8 +355,8 @@ mod tests {
         let cfg = AceConfig::default();
         assert_eq!(cfg.terminal.scrollback_lines, 10_000);
         assert_eq!(cfg.terminal.cursor_style, CursorStyle::Block);
-        assert_eq!(cfg.ai.provider, "anthropic");
-        assert_eq!(cfg.ai.model, "claude-sonnet-4-6");
+        assert_eq!(cfg.ai.provider, "antigravity");
+        assert_eq!(cfg.ai.model, "gemini-4-argon-medium");
         assert_eq!(cfg.ai.approval_mode, ApprovalMode::Default);
         assert!(cfg.ai.auto_intercept);
         assert_eq!(cfg.ui.theme, "Default Dark");
