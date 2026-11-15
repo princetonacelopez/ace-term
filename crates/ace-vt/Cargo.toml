@@ -1,0 +1,11 @@
+[package]
+name = "ace-vt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "ace-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ace-term"
+path = "src/main.rs"
+
+[dependencies]
+ace-config.workspace = true
+ace-pty.workspace = true
+ace-vt.workspace = true
+anyhow.workspace = true
+gpui-kit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

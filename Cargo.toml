@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ace-vt",
+    "crates/ace-pty",
+    "crates/ace-shell",
+    "crates/ace-env",
+    "crates/ace-agent",
+    "crates/ace-config",
+    "crates/ace-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/princetonacelopez/ace-term"
+
+[workspace.dependencies]
+ace-vt = { path = "crates/ace-vt" }
+ace-pty = { path = "crates/ace-pty" }
+ace-shell = { path = "crates/ace-shell" }
+ace-env = { path = "crates/ace-env" }
+ace-agent = { path = "crates/ace-agent" }
+ace-config = { path = "crates/ace-config" }
+
+alacritty_terminal = "0.26"
+anyhow = "1"
+arc-swap = "1"
+dirs = "6"
+gpui-kit = "0.9"
+notify = "8"
+rust-pty = "0.6"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
