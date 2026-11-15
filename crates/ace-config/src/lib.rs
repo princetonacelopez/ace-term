@@ -27,7 +27,7 @@ pub enum ConfigError {
     Parse {
         path: PathBuf,
         #[source]
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
 
     /// Failed to initialize file system watcher.
@@ -186,7 +186,7 @@ impl AceConfig {
                 .or(global_path)
                 .unwrap_or_else(|| Path::new("config.toml"))
                 .to_path_buf(),
-            source,
+            source: Box::new(source),
         })
     }
 
@@ -213,7 +213,7 @@ fn read_toml_value(path: &Path) -> Result<toml::Value, ConfigError> {
     })?;
     toml::from_str::<toml::Value>(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
     })
 }
 
