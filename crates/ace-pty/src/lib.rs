@@ -222,14 +222,23 @@ mod tests {
     #[tokio::test]
     async fn spawns_command_and_reads_output() {
         let config = PtyConfig::builder().window_size(80, 24).build();
-        if let Ok((master, mut child)) =
-            NativePtySystem::spawn("echo", ["ace-pty-ok"], &config).await
-        {
+        #[cfg(windows)]
+        let spawned = NativePtySystem::spawn("cmd", ["/c", "echo", "ace-pty-ok"], &config).await;
+        #[cfg(not(windows))]
+        let spawned = NativePtySystem::spawn("echo", ["ace-pty-ok"], &config).await;
+
+        if let Ok((master, mut child)) = spawned {
             let (mut read_half, _write_half) = tokio::io::split(master);
+            let mut out = String::new();
             let mut buf = [0u8; 256];
-            let n = read_half.read(&mut buf).await.unwrap_or(0);
-            let out = String::from_utf8_lossy(&buf[..n]);
-            assert!(out.contains("ace-pty-ok"));
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline && !out.contains("ace-pty-ok") {
+                match tokio::time::timeout_at(deadline, read_half.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(n)) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            assert!(out.contains("ace-pty-ok"), "unexpected PTY output: {out:?}");
             let _ = child.wait().await;
         }
     }
