@@ -1,10 +1,13 @@
 //! `TerminalCanvasView`: GPUI terminal canvas, top bar, context menu, and settings UI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ace_config::{AceConfig, ConfigStore, CursorStyle};
 use ace_pty::{PtyWriter, spawn_shell};
-use ace_vt::{GridSnapshot, RgbColor, SelectionType, TerminalGrid, TerminalSize, VtEvent, VtTerminal};
+use ace_vt::{
+    GridSnapshot, RgbColor, SelectionType, TerminalGrid, TerminalSize, VtEvent, VtTerminal,
+};
 use gpui_kit::*;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -110,6 +113,7 @@ pub struct TerminalCanvasView {
     settings_open: bool,
     draft_config: AceConfig,
     settings_status: Option<String>,
+    exited: Arc<AtomicBool>,
 }
 
 impl TerminalCanvasView {
@@ -134,6 +138,8 @@ impl TerminalCanvasView {
         let writer_slot = Arc::clone(&pty_writer);
         let wake_for_pty = wake_tx.clone();
         let rt_for_spawn = Arc::clone(&rt);
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_for_pty = Arc::clone(&exited);
 
         rt_for_spawn.spawn(async move {
             let cwd = std::env::current_dir().ok();
@@ -184,6 +190,9 @@ impl TerminalCanvasView {
                 match reader.read(&mut buf).await {
                     Ok(0) => {
                         info!("PTY EOF reached");
+                        exited_for_pty.store(true, Ordering::Release);
+                        let next = wake_for_pty.borrow().wrapping_add(1);
+                        let _ = wake_for_pty.send(next);
                         break;
                     }
                     Ok(n) => {
@@ -206,6 +215,9 @@ impl TerminalCanvasView {
                     }
                     Err(err) => {
                         error!(error = %err, "PTY read error");
+                        exited_for_pty.store(true, Ordering::Release);
+                        let next = wake_for_pty.borrow().wrapping_add(1);
+                        let _ = wake_for_pty.send(next);
                         break;
                     }
                 }
@@ -240,6 +252,7 @@ impl TerminalCanvasView {
             context_menu: None,
             settings_open: false,
             settings_status: None,
+            exited,
         }
     }
 
@@ -311,7 +324,10 @@ impl TerminalCanvasView {
     }
 
     fn pixel_to_cell(&self, pos: Point<Pixels>, padding: f32) -> (usize, usize) {
-        let (cw, lh) = *self.cell_metrics.lock().expect("cell_metrics lock poisoned");
+        let (cw, lh) = *self
+            .cell_metrics
+            .lock()
+            .expect("cell_metrics lock poisoned");
         let x: f32 = pos.x.into();
         let y: f32 = pos.y.into();
         let col = ((x - padding).max(0.0) / cw.max(1.0)).floor() as usize;
@@ -364,7 +380,11 @@ impl TerminalCanvasView {
 
         if let Some(bytes) = encode_keystroke(ks) {
             self.context_menu = None;
-            self.vt.lock().expect("vt lock poisoned").clear_selection();
+            {
+                let mut guard = self.vt.lock().expect("vt lock poisoned");
+                guard.clear_selection();
+                guard.scroll_to_bottom();
+            }
             self.write_to_pty(bytes);
         }
     }
@@ -705,16 +725,14 @@ impl TerminalCanvasView {
                             palette,
                             cx.listener(|this, _, _, cx| {
                                 this.draft_config.ui.opacity =
-                                    ((this.draft_config.ui.opacity - 0.05) * 100.0).round()
-                                        / 100.0;
+                                    ((this.draft_config.ui.opacity - 0.05) * 100.0).round() / 100.0;
                                 this.draft_config.ui.opacity =
                                     this.draft_config.ui.opacity.max(0.6);
                                 cx.notify();
                             }),
                             cx.listener(|this, _, _, cx| {
                                 this.draft_config.ui.opacity =
-                                    ((this.draft_config.ui.opacity + 0.05) * 100.0).round()
-                                        / 100.0;
+                                    ((this.draft_config.ui.opacity + 0.05) * 100.0).round() / 100.0;
                                 this.draft_config.ui.opacity =
                                     this.draft_config.ui.opacity.min(1.0);
                                 cx.notify();
@@ -734,11 +752,9 @@ impl TerminalCanvasView {
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(to_hsla(palette.muted, 1.0))
-                                    .child(
-                                        self.settings_status
-                                            .clone()
-                                            .unwrap_or_else(|| "Saves to ~/.config/ace-term/config.toml".to_string()),
-                                    ),
+                                    .child(self.settings_status.clone().unwrap_or_else(|| {
+                                        "Saves to ~/.config/ace-term/config.toml".to_string()
+                                    })),
                             )
                             .child(
                                 div()
@@ -769,6 +785,9 @@ impl Focusable for TerminalCanvasView {
 
 impl Render for TerminalCanvasView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.exited.load(Ordering::Acquire) {
+            window.remove_window();
+        }
         let cfg: Arc<AceConfig> = self.config_store.get();
         let palette = ThemePalette::from_name(&cfg.ui.theme);
         let padding = cfg.ui.padding as f32;
@@ -883,7 +902,10 @@ impl Render for TerminalCanvasView {
                         };
                         let lines = delta_y.round() as i32;
                         if lines != 0 {
-                            this.vt.lock().expect("vt lock poisoned").scroll_display(lines);
+                            this.vt
+                                .lock()
+                                .expect("vt lock poisoned")
+                                .scroll_display(lines);
                             cx.notify();
                         }
                     }))
@@ -901,9 +923,10 @@ impl Render for TerminalCanvasView {
                                     ..Font::default()
                                 };
                                 let font_id = window.text_system().resolve_font(&font);
-                                let cw: f32 =
-                                    f32::from(window.text_system().layout_width(font_id, font_size, '0'))
-                                        .max(6.0);
+                                let cw: f32 = f32::from(
+                                    window.text_system().layout_width(font_id, font_size, '0'),
+                                )
+                                .max(6.0);
                                 *cell_metrics.lock().expect("cell_metrics lock poisoned") =
                                     (cw, line_height_px);
 
@@ -958,7 +981,10 @@ impl Render for TerminalCanvasView {
                                         };
                                         window.paint_quad(fill(
                                             cell_bounds,
-                                            to_hsla(bg_color, if cell.selected { 0.35 } else { 1.0 }),
+                                            to_hsla(
+                                                bg_color,
+                                                if cell.selected { 0.35 } else { 1.0 },
+                                            ),
                                         ));
                                     }
                                 }
@@ -978,12 +1004,13 @@ impl Render for TerminalCanvasView {
                                     if cell.italic {
                                         run_font.style = FontStyle::Italic;
                                     }
-                                    let fg_color =
-                                        if cell.fg == RgbColor::new(0xcd, 0xd6, 0xf4) && !cell.selected {
-                                            palette.fg
-                                        } else {
-                                            cell.fg
-                                        };
+                                    let fg_color = if cell.fg == RgbColor::new(0xcd, 0xd6, 0xf4)
+                                        && !cell.selected
+                                    {
+                                        palette.fg
+                                    } else {
+                                        cell.fg
+                                    };
                                     let run = TextRun {
                                         len: text.len(),
                                         font: run_font,
@@ -1019,7 +1046,8 @@ impl Render for TerminalCanvasView {
                                 // Paint cursor
                                 if snapshot.cursor.visible {
                                     let cx_px = origin_x + snapshot.cursor.col as f32 * cw;
-                                    let cy_px = origin_y + snapshot.cursor.row as f32 * line_height_px;
+                                    let cy_px =
+                                        origin_y + snapshot.cursor.row as f32 * line_height_px;
                                     let cursor_bounds = match cfg_paint.terminal.cursor_style {
                                         CursorStyle::Block => Bounds {
                                             origin: point(px(cx_px), px(cy_px)),
@@ -1155,7 +1183,10 @@ fn top_bar_button(
         .text_size(px(12.0))
         .border_1()
         .border_color(to_hsla(palette.border, 0.8))
-        .bg(to_hsla(palette.surface_hover, if enabled { 0.7 } else { 0.25 }))
+        .bg(to_hsla(
+            palette.surface_hover,
+            if enabled { 0.7 } else { 0.25 },
+        ))
         .text_color(to_hsla(
             if enabled { palette.fg } else { palette.muted },
             1.0,

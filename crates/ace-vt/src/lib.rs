@@ -138,6 +138,8 @@ pub trait TerminalGrid {
     fn selection_text(&self) -> Option<String>;
     /// Scrolls the viewport by `delta` lines (positive = up into history, negative = down).
     fn scroll_display(&mut self, delta: i32);
+    /// Scrolls the viewport back to the bottom (live prompt).
+    fn scroll_to_bottom(&mut self);
     /// Drains pending `VtEvent` notifications.
     fn drain_events(&mut self) -> Vec<VtEvent>;
 }
@@ -410,6 +412,13 @@ impl TerminalGrid for VtTerminal {
     fn scroll_display(&mut self, delta: i32) {
         if delta != 0 {
             self.term.scroll_display(Scroll::Delta(delta));
+            self.dirty = true;
+        }
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        if self.term.grid().display_offset() > 0 {
+            self.term.scroll_display(Scroll::Bottom);
             self.dirty = true;
         }
     }
