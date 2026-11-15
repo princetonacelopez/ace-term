@@ -10,8 +10,11 @@ name = "ace-term"
 path = "src/main.rs"
 
 [dependencies]
+ace-agent.workspace = true
 ace-config.workspace = true
+ace-env.workspace = true
 ace-pty.workspace = true
+ace-shell.workspace = true
 ace-vt.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
