@@ -50,10 +50,31 @@ cargo run -p ace-ui
 ### Verification
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 cargo deny check licenses
 ```
+
+## AI Setup & Authentication
+
+Store your LLM API key securely in the OS keychain (`keyring`) using the CLI:
+
+```sh
+ace-term auth set anthropic
+ace-term auth set openai
+ace-term auth status
+ace-term auth clear anthropic
+```
+
+You can also configure AI keys from the Settings modal (`Ctrl+,` / `Cmd+,`) or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the environment.
+
+### Mode Routing & Inline AI Blocks
+
+- **Zero-prefix routing**: Commands recognized as valid shell syntax or executables run directly in the PTY; natural-language prompts route to the AI orchestrator.
+- **Mode toggle**: Press `Shift+Tab` (or `Tab` on an empty prompt) or click the status-bar pill to cycle `[AUTO]`, `[AI]`, and `[SHELL]`.
+- **Inline approvals**: Proposed file edits render unified diffs with `[Accept]` / `[Reject]`, and proposed shell commands pause for `[Approve]` / `[Deny]` when `approval_mode = "default"`.
+- **Status bar**: Displays active `git:branch*`, detected project toolchains (`Rust`, `Node`, `Python`, `Go`), non-zero exit quick-fix prompts, and the active routing mode pill.
 
 ## Configuration
 

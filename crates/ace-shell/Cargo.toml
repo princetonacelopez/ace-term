@@ -6,3 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+unicode-normalization.workspace = true
