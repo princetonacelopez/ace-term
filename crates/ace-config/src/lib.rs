@@ -183,6 +183,21 @@ impl AceConfig {
             source,
         })
     }
+
+    /// Serializes and writes this configuration to `path`, creating parent directories if needed.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let body = toml::to_string_pretty(self).expect("AceConfig always serializes to TOML");
+        std::fs::write(path, body).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, ConfigError> {
@@ -300,6 +315,25 @@ impl ConfigStore {
             self.global_path.as_deref(),
             self.workspace_path.as_deref(),
         )?);
+        self.current.store(Arc::clone(&next));
+        Ok(next)
+    }
+
+    /// Saves `config` to the global config path (or `AceConfig::default_global_path()`) and updates the store.
+    pub fn save_global(&self, config: AceConfig) -> Result<Arc<AceConfig>, ConfigError> {
+        let target = self
+            .global_path
+            .clone()
+            .or_else(AceConfig::default_global_path)
+            .ok_or_else(|| ConfigError::Io {
+                path: PathBuf::from("config.toml"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "could not determine user config directory",
+                ),
+            })?;
+        config.save(&target)?;
+        let next = Arc::new(config);
         self.current.store(Arc::clone(&next));
         Ok(next)
     }
