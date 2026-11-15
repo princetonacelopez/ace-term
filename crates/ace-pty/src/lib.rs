@@ -125,7 +125,39 @@ pub async fn spawn_shell(
     let mut builder = PtyConfig::builder()
         .window_size(cols, rows)
         .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor");
+        .env("COLORTERM", "truecolor")
+        .env("TERM_PROGRAM", "ace-term")
+        .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+
+    for var in [
+        "GHOSTTY_RESOURCES_DIR",
+        "GHOSTTY_BIN_DIR",
+        "GHOSTTY_SHELL_FEATURES",
+        "GHOSTTY_SHELL_INTEGRATION_NO_SUDO",
+        "KITTY_WINDOW_ID",
+        "KITTY_PID",
+        "KITTY_PUBLIC_KEY",
+        "KITTY_INSTALLATION_DIR",
+        "ALACRITTY_SOCKET",
+        "ALACRITTY_LOG",
+        "ALACRITTY_WINDOW_ID",
+        "WEZTERM_EXECUTABLE",
+        "WEZTERM_PANE",
+        "WEZTERM_UNIX_SOCKET",
+        "WEZTERM_CONFIG_FILE",
+        "WT_SESSION",
+        "WT_PROFILE_ID",
+        "ITERM_SESSION_ID",
+        "ITERM_PROFILE",
+        "VTE_VERSION",
+        "KONSOLE_VERSION",
+        "KONSOLE_DBUS_SESSION",
+        "GNOME_TERMINAL_SCREEN",
+        "GNOME_TERMINAL_SERVICE",
+        "COLORFGBG",
+    ] {
+        builder = builder.env_remove(var);
+    }
 
     if let Some(dir) = cwd {
         builder = builder.working_directory(dir);

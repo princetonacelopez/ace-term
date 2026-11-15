@@ -75,7 +75,13 @@ ligatures = true
 
 ---
 
-## 3. Live Hot-Reloading
+## 3. Top Bar, Context Menu, and Settings UI
+
+- **Top Bar**: Displays the active shell/window title alongside quick actions (`Copy`, `Paste`, `Clear`, and `Settings`).
+- **Right-Click Context Menu**: Right-click anywhere in the terminal canvas to open the context menu with `Copy` (`Ctrl+Shift+C`), `Paste` (`Ctrl+Shift+V`), `Clear` (`Ctrl+L`), and `Settings` (`Ctrl+,`).
+- **Settings UI (`Ctrl+,` / `Cmd+,`)**: Adjust Theme (`Default Dark`, `Default Light`, `Dracula`, `Nord`), Font Family, Font Size, Line Height, Cursor Style (`Block`, `Bar`, `Underline`), Padding, and Opacity, then click **Save & Apply** to write `~/.config/ace-term/config.toml` and apply immediately.
+
+## 4. Live Hot-Reloading
 
 Ace Term watches both `~/.config/ace-term/config.toml` and `.ace/config.toml` for changes:
 
@@ -88,7 +94,7 @@ If you save an invalid TOML edit, Ace Term logs a warning and keeps the last val
 
 ---
 
-## 4. Terminal Controls & Features
+## 5. Terminal Controls & Features
 
 - **Shell Execution & Signals**: Ace Term wraps your existing shell (`zsh`, `bash`, `pwsh`) over an async PTY. Keystrokes and `Ctrl+C` (`0x03`) are written directly to the PTY without waiting on render frames.
 - **Mouse Selection & Clipboard**:
