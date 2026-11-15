@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ace_agent::{
-    AgentEvent, ChatMessage, DiscoveredProvider, discover_local_ai, is_local_provider,
-    run_agent_turn,
+    AgentEvent, ChatMessage, DiscoveredProvider, PendingApproval, discover_local_ai,
+    is_local_provider, run_agent_turn,
 };
 use ace_config::secrets::{load_api_key, store_api_key};
 use ace_config::{AceConfig, ApprovalMode, ConfigStore, CursorStyle};
@@ -22,7 +22,7 @@ use gpui_kit::*;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use crate::ai_block::{AiBlock, AiBlockColors, render_ai_block};
+use crate::ai_block::AiBlock;
 
 const TOP_BAR_HEIGHT: f32 = 34.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
@@ -410,6 +410,13 @@ impl TerminalCanvasView {
         cx.notify();
     }
 
+    fn feed_vt_text(&self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        let mut guard = self.vt.lock().expect("vt lock poisoned");
+        guard.feed_bytes(normalized.as_bytes());
+        guard.scroll_to_bottom();
+    }
+
     fn spawn_agent_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
         let cfg = (*self.config_store.get()).clone();
         let env = self
@@ -423,6 +430,7 @@ impl TerminalCanvasView {
 
         self.ai_block = Some(AiBlock::new(prompt.clone()));
         self.agent_rx = Some(rx);
+        self.feed_vt_text(&format!("\r\x1b[2K\x1b[1;36m[ai]\x1b[0m {prompt}\n"));
 
         let rt = Arc::clone(&self.rt);
         let wake_tx = self.wake_tx.clone();
@@ -457,27 +465,66 @@ impl TerminalCanvasView {
         if drained.is_empty() && !finished {
             return false;
         }
+
+        let mut vt_chunks = Vec::new();
         if let Some(block) = self.ai_block.as_mut() {
             for ev in drained {
+                match &ev {
+                    AgentEvent::Token(delta) => vt_chunks.push(delta.clone()),
+                    AgentEvent::ToolStarted { name, summary } => {
+                        vt_chunks.push(format!("\n\x1b[2m[{name}] {summary}\x1b[0m\n"));
+                    }
+                    AgentEvent::ApprovalRequired { action, .. } => match action {
+                        PendingApproval::WriteFile { path, diff, .. } => {
+                            vt_chunks.push(format!(
+                                "\n\x1b[1;33m[edit] {}\x1b[0m\n{}\n\x1b[1;33mAccept edit? [y/N]: \x1b[0m",
+                                path.display(),
+                                diff
+                            ));
+                        }
+                        PendingApproval::RunShell { command, .. } => {
+                            vt_chunks.push(format!(
+                                "\n\x1b[1;33m[shell] {command}\x1b[0m\n\x1b[1;33mRun command? [y/N]: \x1b[0m"
+                            ));
+                        }
+                    },
+                    AgentEvent::ToolFinished { name, .. } => {
+                        vt_chunks.push(format!("\x1b[2m[{name} done]\x1b[0m\n"));
+                    }
+                    AgentEvent::Done => {}
+                    AgentEvent::Error(err) => {
+                        vt_chunks.push(format!("\n\x1b[31merror: {err}\x1b[0m\n"));
+                    }
+                }
                 block.apply_event(ev);
             }
-            if finished && !block.response.is_empty() {
-                self.ai_history.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: block.prompt.clone(),
-                });
-                self.ai_history.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: block.response.clone(),
-                });
-                if self.ai_history.len() > 16 {
-                    let drop_n = self.ai_history.len() - 16;
-                    self.ai_history.drain(..drop_n);
+            if finished {
+                if !block.response.is_empty() {
+                    self.ai_history.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: block.prompt.clone(),
+                    });
+                    self.ai_history.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: block.response.clone(),
+                    });
+                    if self.ai_history.len() > 16 {
+                        let drop_n = self.ai_history.len() - 16;
+                        self.ai_history.drain(..drop_n);
+                    }
                 }
+                vt_chunks.push("\n".to_string());
             }
         }
+
+        for chunk in vt_chunks {
+            self.feed_vt_text(&chunk);
+        }
+
         if finished {
             self.agent_rx = None;
+            self.ai_block = None;
+            self.write_to_pty(vec![b'\r']);
         }
         true
     }
@@ -577,6 +624,35 @@ impl TerminalCanvasView {
         }
 
         let is_alt = self.vt.lock().expect("vt lock poisoned").is_alt_screen();
+
+        // Inline terminal approval / cancellation while an AI turn is active
+        if self.agent_rx.is_some() {
+            if mods.control && ks.key.eq_ignore_ascii_case("c") {
+                if let Some(mut b) = self.ai_block.take() {
+                    b.resolve_approval(false);
+                }
+                self.agent_rx = None;
+                self.feed_vt_text("^C\n");
+                self.write_to_pty(vec![b'\r']);
+                cx.notify();
+                return;
+            }
+            if let Some(block) = self.ai_block.as_mut()
+                && block.pending_approval.is_some()
+            {
+                let decision = match ks.key.as_str() {
+                    "y" | "Y" => Some(true),
+                    "n" | "N" | "enter" | "escape" => Some(false),
+                    _ => None,
+                };
+                if let Some(approved) = decision {
+                    block.resolve_approval(approved);
+                    self.feed_vt_text(if approved { "y\n" } else { "n\n" });
+                    cx.notify();
+                }
+                return;
+            }
+        }
 
         // Mode toggle: Shift+Tab anytime (outside alt-screen), or Tab when line buffer is empty
         if !is_alt && ks.key == "tab" && (mods.shift || self.line_buffer.trim().is_empty()) {
@@ -1579,40 +1655,6 @@ impl Render for TerminalCanvasView {
                         .size_full(),
                     ),
             );
-
-        if let Some(block) = &self.ai_block {
-            let colors = AiBlockColors {
-                bg: palette.bg,
-                surface: palette.surface,
-                border: palette.border,
-                fg: palette.fg,
-                muted: palette.muted,
-                accent: palette.accent,
-            };
-            root = root.child(render_ai_block(
-                block,
-                colors,
-                cx.listener(|this, _, _, cx| {
-                    if let Some(mut b) = this.ai_block.take() {
-                        b.resolve_approval(false);
-                    }
-                    this.agent_rx = None;
-                    cx.notify();
-                }),
-                cx.listener(|this, _, _, cx| {
-                    if let Some(b) = this.ai_block.as_mut() {
-                        b.resolve_approval(true);
-                    }
-                    cx.notify();
-                }),
-                cx.listener(|this, _, _, cx| {
-                    if let Some(b) = this.ai_block.as_mut() {
-                        b.resolve_approval(false);
-                    }
-                    cx.notify();
-                }),
-            ));
-        }
 
         root = root.child(self.render_status_bar(palette, cx));
 
