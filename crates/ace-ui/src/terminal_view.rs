@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ace_agent::{AgentEvent, ChatMessage, run_agent_turn};
+use ace_agent::{
+    AgentEvent, ChatMessage, DiscoveredProvider, discover_local_ai, is_local_provider,
+    run_agent_turn,
+};
 use ace_config::secrets::{load_api_key, store_api_key};
 use ace_config::{AceConfig, ApprovalMode, ConfigStore, CursorStyle};
 use ace_env::{EnvDetector, EnvSnapshot};
@@ -132,6 +135,9 @@ pub struct TerminalCanvasView {
     ai_block: Option<AiBlock>,
     ai_history: Vec<ChatMessage>,
     agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
+    wake_tx: watch::Sender<u64>,
+    discovered_providers: Arc<Mutex<Vec<DiscoveredProvider>>>,
+    discovering_ai: Arc<AtomicBool>,
 }
 
 impl TerminalCanvasView {
@@ -309,7 +315,7 @@ impl TerminalCanvasView {
         })
         .detach();
 
-        Self {
+        let view = Self {
             focus_handle: cx.focus_handle(),
             vt,
             pty_writer,
@@ -332,7 +338,34 @@ impl TerminalCanvasView {
             ai_block: None,
             ai_history: Vec::new(),
             agent_rx: None,
+            wake_tx,
+            discovered_providers: Arc::new(Mutex::new(Vec::new())),
+            discovering_ai: Arc::new(AtomicBool::new(false)),
+        };
+        view.refresh_ai_discovery();
+        view
+    }
+
+    fn refresh_ai_discovery(&self) {
+        if self
+            .discovering_ai
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
         }
+        let providers_slot = Arc::clone(&self.discovered_providers);
+        let flag = Arc::clone(&self.discovering_ai);
+        let wake_tx = self.wake_tx.clone();
+        self.rt.spawn(async move {
+            let discovered = discover_local_ai().await;
+            *providers_slot
+                .lock()
+                .expect("discovered_providers lock poisoned") = discovered;
+            flag.store(false, Ordering::Release);
+            let next = wake_tx.borrow().wrapping_add(1);
+            let _ = wake_tx.send(next);
+        });
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
@@ -466,6 +499,14 @@ impl TerminalCanvasView {
         if self.settings_open {
             self.draft_config = (*self.config_store.get()).clone();
             self.settings_status = None;
+            if self
+                .discovered_providers
+                .lock()
+                .expect("discovered_providers lock poisoned")
+                .is_empty()
+            {
+                self.refresh_ai_discovery();
+            }
         }
         self.context_menu = None;
         cx.notify();
@@ -735,7 +776,8 @@ impl TerminalCanvasView {
             )
             .child(
                 div()
-                    .w(px(460.0))
+                    .w(px(560.0))
+                    .max_h(px(640.0))
                     .p(px(18.0))
                     .rounded(px(12.0))
                     .bg(to_hsla(palette.surface, 1.0))
@@ -932,34 +974,151 @@ impl TerminalCanvasView {
                         ),
                     ))
                     // AI Provider selector
-                    .child(setting_row(
-                        "AI Provider",
-                        palette,
-                        div().flex().gap(px(6.0)).children(
-                            [
-                                ("anthropic", "claude-sonnet-4-6"),
-                                ("openai", "gpt-4o"),
-                                ("ollama", "llama3.2"),
+                    .child({
+                        let discovered = self
+                            .discovered_providers
+                            .lock()
+                            .expect("discovered_providers lock poisoned")
+                            .clone();
+                        let discovering = self.discovering_ai.load(Ordering::Acquire);
+                        let provider_buttons: Vec<(String, String, String)> = if discovered
+                            .is_empty()
+                        {
+                            vec![
+                                (
+                                    "antigravity".to_string(),
+                                    "Antigravity".to_string(),
+                                    "gemini-4-argon-medium".to_string(),
+                                ),
+                                (
+                                    "anthropic".to_string(),
+                                    "Anthropic".to_string(),
+                                    "claude-sonnet-4-6".to_string(),
+                                ),
+                                (
+                                    "openai".to_string(),
+                                    "OpenAI".to_string(),
+                                    "gpt-4o".to_string(),
+                                ),
                             ]
-                            .into_iter()
-                            .map(|(provider, default_model)| {
-                                let active = draft.ai.provider.eq_ignore_ascii_case(provider);
-                                let prov_owned = provider.to_string();
-                                let model_owned = default_model.to_string();
-                                pill_button(
-                                    format!("provider-{provider}"),
-                                    provider,
-                                    active,
+                        } else {
+                            discovered
+                                .iter()
+                                .map(|p| {
+                                    let badge = if p.local && p.installed {
+                                        format!("{} (Local)", p.label)
+                                    } else if p.local {
+                                        format!("{} (Not found)", p.label)
+                                    } else {
+                                        p.label.clone()
+                                    };
+                                    let default_model =
+                                        p.models.first().map(|m| m.id.clone()).unwrap_or_default();
+                                    (p.id.clone(), badge, default_model)
+                                })
+                                .collect()
+                        };
+
+                        setting_row(
+                            "AI Provider",
+                            palette,
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(6.0))
+                                .children(provider_buttons.into_iter().map(
+                                    |(provider, label, default_model)| {
+                                        let active =
+                                            draft.ai.provider.eq_ignore_ascii_case(&provider);
+                                        let prov_owned = provider.clone();
+                                        let model_owned = default_model;
+                                        pill_button(
+                                            format!("provider-{provider}"),
+                                            &label,
+                                            active,
+                                            palette,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.draft_config.ai.provider = prov_owned.clone();
+                                                if !model_owned.is_empty() {
+                                                    this.draft_config.ai.model =
+                                                        model_owned.clone();
+                                                }
+                                                cx.notify();
+                                            }),
+                                        )
+                                    },
+                                ))
+                                .child(top_bar_button(
+                                    "refresh-ai-btn",
+                                    if discovering {
+                                        "Scanning..."
+                                    } else {
+                                        "Refresh"
+                                    },
+                                    !discovering,
                                     palette,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.draft_config.ai.provider = prov_owned.clone();
-                                        this.draft_config.ai.model = model_owned.clone();
+                                    cx.listener(|this, _, _, cx| {
+                                        this.refresh_ai_discovery();
                                         cx.notify();
                                     }),
-                                )
-                            }),
-                        ),
-                    ))
+                                )),
+                        )
+                    })
+                    .child({
+                        let discovered = self
+                            .discovered_providers
+                            .lock()
+                            .expect("discovered_providers lock poisoned")
+                            .clone();
+                        let discovering = self.discovering_ai.load(Ordering::Acquire);
+                        let active_provider = discovered
+                            .iter()
+                            .find(|p| p.id.eq_ignore_ascii_case(&draft.ai.provider))
+                            .cloned();
+
+                        let model_content = match active_provider {
+                            Some(p) if !p.models.is_empty() => div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(4.0))
+                                .children(p.models.into_iter().map(|m| {
+                                    let active = draft.ai.model == m.id;
+                                    let model_id = m.id.clone();
+                                    pill_button(
+                                        format!("model-{}", m.id),
+                                        &m.label,
+                                        active,
+                                        palette,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.draft_config.ai.model = model_id.clone();
+                                            cx.notify();
+                                        }),
+                                    )
+                                }))
+                                .into_any_element(),
+                            Some(p) => div()
+                                .text_size(px(11.0))
+                                .text_color(to_hsla(palette.muted, 1.0))
+                                .child(if discovering {
+                                    "Scanning local models...".to_string()
+                                } else {
+                                    format!("No models listed ({})", p.detail)
+                                })
+                                .into_any_element(),
+                            None => div()
+                                .text_size(px(11.0))
+                                .text_color(to_hsla(palette.muted, 1.0))
+                                .child(if discovering {
+                                    "Detecting local AI & models...".to_string()
+                                } else {
+                                    draft.ai.model.clone()
+                                })
+                                .into_any_element(),
+                        };
+
+                        setting_row("AI Model", palette, model_content)
+                    })
                     // Approval mode selector
                     .child(setting_row(
                         "AI Approval",
@@ -988,7 +1147,9 @@ impl TerminalCanvasView {
                     // Keyring API key status + paste from clipboard
                     .child(setting_row("API Key", palette, {
                         let provider_name = draft.ai.provider.clone();
-                        let configured = load_api_key(&provider_name).ok().flatten().is_some();
+                        let local_provider = is_local_provider(&provider_name);
+                        let configured = !local_provider
+                            && load_api_key(&provider_name).ok().flatten().is_some();
                         div()
                             .flex()
                             .items_center()
@@ -997,15 +1158,15 @@ impl TerminalCanvasView {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(to_hsla(
-                                        if configured {
+                                        if local_provider || configured {
                                             RgbColor::new(0xa6, 0xe3, 0xa1)
                                         } else {
                                             palette.muted
                                         },
                                         1.0,
                                     ))
-                                    .child(if provider_name.eq_ignore_ascii_case("ollama") {
-                                        "Local (no key)"
+                                    .child(if local_provider {
+                                        "Local (no key required)"
                                     } else if configured {
                                         "Keyring: Configured"
                                     } else {
@@ -1015,7 +1176,7 @@ impl TerminalCanvasView {
                             .child(top_bar_button(
                                 "paste-api-key-btn",
                                 "Set from Clipboard",
-                                !provider_name.eq_ignore_ascii_case("ollama"),
+                                !local_provider,
                                 palette,
                                 cx.listener(move |this, _, _, cx| {
                                     let prov = this.draft_config.ai.provider.clone();

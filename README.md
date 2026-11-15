@@ -89,8 +89,8 @@ scrollback_lines = 10000
 cursor_style = "block"
 
 [ai]
-provider = "anthropic"
-model = "claude-sonnet-4-6"
+provider = "antigravity"
+model = "gemini-4-argon-medium"
 base_url = ""
 approval_mode = "default"
 auto_intercept = true
