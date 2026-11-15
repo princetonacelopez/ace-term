@@ -1,8 +1,8 @@
 //! Cross-platform asynchronous PTY layer built on `rust-pty` and `tokio`.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rust_pty::{NativePtySystem, PtyConfig, PtyError, PtyMaster, PtySystem};
 use thiserror::Error;
@@ -165,7 +165,9 @@ pub async fn spawn_shell(
 
     let config = builder.build();
     let (master, child) = match shell.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(program) => NativePtySystem::spawn(program, std::iter::empty::<&str>(), &config).await?,
+        Some(program) => {
+            NativePtySystem::spawn(program, std::iter::empty::<&str>(), &config).await?
+        }
         None => NativePtySystem::spawn_shell(&config).await?,
     };
 
@@ -202,7 +204,9 @@ mod tests {
     #[tokio::test]
     async fn spawns_command_and_reads_output() {
         let config = PtyConfig::builder().window_size(80, 24).build();
-        if let Ok((master, mut child)) = NativePtySystem::spawn("echo", ["ace-pty-ok"], &config).await {
+        if let Ok((master, mut child)) =
+            NativePtySystem::spawn("echo", ["ace-pty-ok"], &config).await
+        {
             let (mut read_half, _write_half) = tokio::io::split(master);
             let mut buf = [0u8; 256];
             let n = read_half.read(&mut buf).await.unwrap_or(0);

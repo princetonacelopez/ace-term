@@ -67,9 +67,7 @@ fn main() {
         };
 
         gpui_kit::open_window(options, cx, move |window, cx| {
-            let view = cx.new(|cx| {
-                TerminalCanvasView::new(rt, config_store, wake_rx, wake_tx, cx)
-            });
+            let view = cx.new(|cx| TerminalCanvasView::new(rt, config_store, wake_rx, wake_tx, cx));
             let focus_handle = view.read(cx).focus_handle(cx);
             window.focus(&focus_handle, cx);
             view
