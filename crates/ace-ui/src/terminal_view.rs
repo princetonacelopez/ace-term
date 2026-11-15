@@ -305,7 +305,8 @@ impl TerminalCanvasView {
 
         cx.spawn(async move |this, cx| {
             while wake_rx.changed().await.is_ok() {
-                let updated = this.update(cx, |_, cx| {
+                let updated = this.update(cx, |view, cx| {
+                    view.drain_agent_events();
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -417,33 +418,27 @@ impl TerminalCanvasView {
             .expect("env_snapshot lock poisoned")
             .clone();
         let history = self.ai_history.clone();
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel();
         let (tx, rx) = mpsc::unbounded_channel();
 
         self.ai_block = Some(AiBlock::new(prompt.clone()));
         self.agent_rx = Some(rx);
 
         let rt = Arc::clone(&self.rt);
+        let wake_tx = self.wake_tx.clone();
         rt.spawn(async move {
-            run_agent_turn(prompt, history, env, cfg, tx).await;
-        });
-
-        cx.spawn(async move |this, cx| {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(24)).await;
-                let keep_going = this.update(cx, |view, cx| {
-                    let changed = view.drain_agent_events();
-                    if changed {
-                        cx.notify();
+            let agent_fut = run_agent_turn(prompt, history, env, cfg, raw_tx);
+            let pump_fut = async move {
+                while let Some(ev) = raw_rx.recv().await {
+                    if tx.send(ev).is_err() {
+                        break;
                     }
-                    view.agent_rx.is_some()
-                });
-                match keep_going {
-                    Ok(true) => {}
-                    _ => break,
+                    let next = wake_tx.borrow().wrapping_add(1);
+                    let _ = wake_tx.send(next);
                 }
-            }
-        })
-        .detach();
+            };
+            tokio::join!(agent_fut, pump_fut);
+        });
 
         cx.notify();
     }
