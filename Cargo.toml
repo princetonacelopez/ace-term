@@ -15,14 +15,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/princetonacelopez/ace-term"
 
 [workspace.dependencies]
 ace-vt = { path = "crates/ace-vt" }
 ace-pty = { path = "crates/ace-pty" }
-ace-shell = { path = "crates/ace-shell" }
-ace-env = { path = "crates/ace-env" }
-ace-agent = { path = "crates/ace-agent" }
 ace-config = { path = "crates/ace-config" }
 
 alacritty_terminal = "0.26"

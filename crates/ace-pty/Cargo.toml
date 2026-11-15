@@ -9,5 +9,7 @@ license.workspace = true
 rust-pty.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 unicode-normalization.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
