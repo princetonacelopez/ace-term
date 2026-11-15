@@ -1,9 +1,12 @@
-//! Ace Term (`ace-term`) GPU-accelerated terminal emulator entry point.
+//! Ace Term (`ace-term`) GPU-accelerated terminal emulator entry point and CLI auth.
 
+mod ai_block;
 mod terminal_view;
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
+use ace_config::secrets::{delete_api_key, load_api_key, store_api_key};
 use ace_config::{AceConfig, ConfigStore};
 use gpui_kit::*;
 use tokio::sync::watch;
@@ -12,6 +15,15 @@ use tracing::warn;
 use crate::terminal_view::TerminalCanvasView;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("auth") {
+        if let Err(err) = run_auth_cli(&args[2..]) {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -74,4 +86,46 @@ fn main() {
         })
         .expect("failed to open Ace Term window");
     });
+}
+
+fn run_auth_cli(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("set") => {
+            let provider = args.get(1).map(String::as_str).unwrap_or("anthropic");
+            let key = if let Some(inline) = args.get(2) {
+                inline.clone()
+            } else {
+                print!("Enter API key for {provider}: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                input.trim().to_string()
+            };
+            if key.is_empty() {
+                anyhow::bail!("API key cannot be empty");
+            }
+            store_api_key(provider, &key)?;
+            println!("Stored API key for '{provider}' in OS keychain.");
+        }
+        Some("clear") => {
+            let provider = args.get(1).map(String::as_str).unwrap_or("anthropic");
+            delete_api_key(provider)?;
+            println!("Cleared API key for '{provider}' from OS keychain.");
+        }
+        Some("status") | None => {
+            for provider in ["anthropic", "openai"] {
+                let status = match load_api_key(provider)? {
+                    Some(_) => "configured",
+                    None => "not set",
+                };
+                println!("{provider}: {status}");
+            }
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "unknown auth subcommand '{other}'. Usage: ace-term auth [set <provider> [key] | clear <provider> | status]"
+            );
+        }
+    }
+    Ok(())
 }

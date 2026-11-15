@@ -1,5 +1,7 @@
 //! Configuration loading, hot-reloading, and secret management for Ace Term.
 
+pub mod secrets;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,6 +33,10 @@ pub enum ConfigError {
     /// Failed to initialize file system watcher.
     #[error("failed to watch config path: {0}")]
     Watch(#[from] notify::Error),
+
+    /// OS keychain operation failed.
+    #[error("keyring error: {0}")]
+    Keyring(String),
 }
 
 /// Cursor rendering style.

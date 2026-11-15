@@ -119,6 +119,18 @@ pub async fn spawn_shell(
     cols: u16,
     rows: u16,
 ) -> Result<SpawnedPty, AcePtyError> {
+    spawn_shell_with_options(shell, &[], &[], cwd, cols, rows).await
+}
+
+/// Spawns an interactive shell in a new PTY with optional arguments and extra environment variables.
+pub async fn spawn_shell_with_options(
+    shell: Option<&str>,
+    args: &[String],
+    extra_env: &[(String, String)],
+    cwd: Option<&Path>,
+    cols: u16,
+    rows: u16,
+) -> Result<SpawnedPty, AcePtyError> {
     let cols = cols.max(1);
     let rows = rows.max(1);
 
@@ -128,6 +140,10 @@ pub async fn spawn_shell(
         .env("COLORTERM", "truecolor")
         .env("TERM_PROGRAM", "ace-term")
         .env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+
+    for (k, v) in extra_env {
+        builder = builder.env(k, v);
+    }
 
     for var in [
         "GHOSTTY_RESOURCES_DIR",
@@ -166,7 +182,7 @@ pub async fn spawn_shell(
     let config = builder.build();
     let (master, child) = match shell.map(str::trim).filter(|s| !s.is_empty()) {
         Some(program) => {
-            NativePtySystem::spawn(program, std::iter::empty::<&str>(), &config).await?
+            NativePtySystem::spawn(program, args.iter().map(String::as_str), &config).await?
         }
         None => NativePtySystem::spawn_shell(&config).await?,
     };

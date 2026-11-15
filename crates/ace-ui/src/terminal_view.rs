@@ -1,18 +1,28 @@
 //! `TerminalCanvasView`: GPUI terminal canvas, top bar, context menu, and settings UI.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ace_config::{AceConfig, ConfigStore, CursorStyle};
-use ace_pty::{PtyWriter, spawn_shell};
+use ace_agent::{AgentEvent, ChatMessage, run_agent_turn};
+use ace_config::secrets::{load_api_key, store_api_key};
+use ace_config::{AceConfig, ApprovalMode, ConfigStore, CursorStyle};
+use ace_env::{EnvDetector, EnvSnapshot};
+use ace_pty::{PtyWriter, spawn_shell_with_options};
+use ace_shell::{
+    CommandClassifier, InputMode, OscScanner, RouteTarget, ShellEvent, prepare_shell_launch,
+};
 use ace_vt::{
     GridSnapshot, RgbColor, SelectionType, TerminalGrid, TerminalSize, VtEvent, VtTerminal,
 };
 use gpui_kit::*;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
+use crate::ai_block::{AiBlock, AiBlockColors, render_ai_block};
+
 const TOP_BAR_HEIGHT: f32 = 34.0;
+const STATUS_BAR_HEIGHT: f32 = 28.0;
 
 /// Theme palette derived from `AceConfig::ui.theme`.
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +124,14 @@ pub struct TerminalCanvasView {
     draft_config: AceConfig,
     settings_status: Option<String>,
     exited: Arc<AtomicBool>,
+    classifier: Arc<CommandClassifier>,
+    input_mode: InputMode,
+    line_buffer: String,
+    env_snapshot: Arc<Mutex<EnvSnapshot>>,
+    last_failed_exit: Arc<Mutex<Option<i32>>>,
+    ai_block: Option<AiBlock>,
+    ai_history: Vec<ChatMessage>,
+    agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
 }
 
 impl TerminalCanvasView {
@@ -133,6 +151,24 @@ impl TerminalCanvasView {
         )));
         let pty_writer: Arc<Mutex<Option<PtyWriter>>> = Arc::new(Mutex::new(None));
 
+        let env_detector = EnvDetector::new();
+        let initial_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let env_snapshot = Arc::new(Mutex::new(EnvSnapshot {
+            cwd: initial_cwd.clone(),
+            ..EnvSnapshot::default()
+        }));
+        let last_failed_exit = Arc::new(Mutex::new(None));
+
+        let env_for_init = Arc::clone(&env_snapshot);
+        let wake_for_env_init = wake_tx.clone();
+        let detector_init = env_detector.clone();
+        rt.spawn(async move {
+            let snap = detector_init.detect(initial_cwd).await;
+            *env_for_init.lock().expect("env_snapshot lock poisoned") = snap;
+            let next = wake_for_env_init.borrow().wrapping_add(1);
+            let _ = wake_for_env_init.send(next);
+        });
+
         let shell_cfg = cfg.terminal.shell.clone();
         let vt_for_pty = Arc::clone(&vt);
         let writer_slot = Arc::clone(&pty_writer);
@@ -140,11 +176,16 @@ impl TerminalCanvasView {
         let rt_for_spawn = Arc::clone(&rt);
         let exited = Arc::new(AtomicBool::new(false));
         let exited_for_pty = Arc::clone(&exited);
+        let env_for_pty = Arc::clone(&env_snapshot);
+        let failed_for_pty = Arc::clone(&last_failed_exit);
 
         rt_for_spawn.spawn(async move {
             let cwd = std::env::current_dir().ok();
-            let spawned = match spawn_shell(
-                Some(shell_cfg.as_str()),
+            let launch = prepare_shell_launch(Some(shell_cfg.as_str()));
+            let spawned = match spawn_shell_with_options(
+                Some(&launch.program),
+                &launch.args,
+                &launch.extra_env,
                 cwd.as_deref(),
                 initial_size.cols as u16,
                 initial_size.rows as u16,
@@ -166,6 +207,7 @@ impl TerminalCanvasView {
 
             let mut reader = spawned.reader;
             let mut child = spawned.child;
+            let mut osc_scanner = OscScanner::default();
             let mut buf = vec![0u8; 16 * 1024];
             let mut seq: u64 = 1;
 
@@ -196,6 +238,35 @@ impl TerminalCanvasView {
                         break;
                     }
                     Ok(n) => {
+                        for shell_ev in osc_scanner.feed(&buf[..n]) {
+                            match shell_ev {
+                                ShellEvent::CwdChanged(new_cwd) => {
+                                    let detector = env_detector.clone();
+                                    let env_slot = Arc::clone(&env_for_pty);
+                                    let wake = wake_for_pty.clone();
+                                    tokio::spawn(async move {
+                                        let snap = detector.detect(PathBuf::from(new_cwd)).await;
+                                        *env_slot.lock().expect("env_snapshot lock poisoned") =
+                                            snap;
+                                        let next = wake.borrow().wrapping_add(1);
+                                        let _ = wake.send(next);
+                                    });
+                                }
+                                ShellEvent::CommandFinished(Some(code)) => {
+                                    *failed_for_pty
+                                        .lock()
+                                        .expect("last_failed_exit lock poisoned") =
+                                        (code != 0).then_some(code);
+                                    seq = seq.wrapping_add(1);
+                                    let _ = wake_for_pty.send(seq);
+                                }
+                                ShellEvent::PromptStart
+                                | ShellEvent::CommandStart
+                                | ShellEvent::CommandExecuted
+                                | ShellEvent::CommandFinished(None) => {}
+                            }
+                        }
+
                         let events = {
                             let mut guard = vt_for_pty.lock().expect("vt lock poisoned");
                             guard.feed_bytes(&buf[..n]);
@@ -253,6 +324,14 @@ impl TerminalCanvasView {
             settings_open: false,
             settings_status: None,
             exited,
+            classifier: Arc::new(CommandClassifier::new()),
+            input_mode: InputMode::Auto,
+            line_buffer: String::new(),
+            env_snapshot,
+            last_failed_exit,
+            ai_block: None,
+            ai_history: Vec::new(),
+            agent_rx: None,
         }
     }
 
@@ -290,6 +369,89 @@ impl TerminalCanvasView {
         }
         self.context_menu = None;
         cx.notify();
+    }
+
+    fn toggle_mode(&mut self, cx: &mut Context<Self>) {
+        self.input_mode = self.input_mode.toggle();
+        cx.notify();
+    }
+
+    fn spawn_agent_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let cfg = (*self.config_store.get()).clone();
+        let env = self
+            .env_snapshot
+            .lock()
+            .expect("env_snapshot lock poisoned")
+            .clone();
+        let history = self.ai_history.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        self.ai_block = Some(AiBlock::new(prompt.clone()));
+        self.agent_rx = Some(rx);
+
+        let rt = Arc::clone(&self.rt);
+        rt.spawn(async move {
+            run_agent_turn(prompt, history, env, cfg, tx).await;
+        });
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(24)).await;
+                let keep_going = this.update(cx, |view, cx| {
+                    let changed = view.drain_agent_events();
+                    if changed {
+                        cx.notify();
+                    }
+                    view.agent_rx.is_some()
+                });
+                match keep_going {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    fn drain_agent_events(&mut self) -> bool {
+        let mut drained = Vec::new();
+        let mut finished = false;
+        if let Some(rx) = self.agent_rx.as_mut() {
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, AgentEvent::Done | AgentEvent::Error(_)) {
+                    finished = true;
+                }
+                drained.push(ev);
+            }
+        }
+        if drained.is_empty() && !finished {
+            return false;
+        }
+        if let Some(block) = self.ai_block.as_mut() {
+            for ev in drained {
+                block.apply_event(ev);
+            }
+            if finished && !block.response.is_empty() {
+                self.ai_history.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: block.prompt.clone(),
+                });
+                self.ai_history.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: block.response.clone(),
+                });
+                if self.ai_history.len() > 16 {
+                    let drop_n = self.ai_history.len() - 16;
+                    self.ai_history.drain(..drop_n);
+                }
+            }
+        }
+        if finished {
+            self.agent_rx = None;
+        }
+        true
     }
 
     fn clear_terminal(&mut self, cx: &mut Context<Self>) {
@@ -378,7 +540,37 @@ impl TerminalCanvasView {
             return;
         }
 
+        let is_alt = self.vt.lock().expect("vt lock poisoned").is_alt_screen();
+
+        // Mode toggle: Shift+Tab anytime (outside alt-screen), or Tab when line buffer is empty
+        if !is_alt && ks.key == "tab" && (mods.shift || self.line_buffer.trim().is_empty()) {
+            self.toggle_mode(cx);
+            return;
+        }
+
+        // Zero-prefix AI routing on Enter
+        if !is_alt && ks.key == "enter" {
+            let line = std::mem::take(&mut self.line_buffer);
+            let cfg = self.config_store.get();
+            let effective_mode = if !cfg.ai.auto_intercept && self.input_mode == InputMode::Auto {
+                InputMode::Shell
+            } else {
+                self.input_mode
+            };
+            if self.classifier.classify(&line, effective_mode, is_alt) == RouteTarget::Agent {
+                self.context_menu = None;
+                self.vt.lock().expect("vt lock poisoned").clear_selection();
+                // Clear the shell's line buffer without executing in the shell
+                self.write_to_pty(vec![0x15]);
+                self.spawn_agent_turn(line.trim().to_string(), cx);
+                return;
+            }
+        }
+
         if let Some(bytes) = encode_keystroke(ks) {
+            if !is_alt {
+                update_line_buffer(&mut self.line_buffer, ks, &bytes);
+            }
             self.context_menu = None;
             {
                 let mut guard = self.vt.lock().expect("vt lock poisoned");
@@ -739,6 +931,116 @@ impl TerminalCanvasView {
                             }),
                         ),
                     ))
+                    // AI Provider selector
+                    .child(setting_row(
+                        "AI Provider",
+                        palette,
+                        div().flex().gap(px(6.0)).children(
+                            [
+                                ("anthropic", "claude-sonnet-4-6"),
+                                ("openai", "gpt-4o"),
+                                ("ollama", "llama3.2"),
+                            ]
+                            .into_iter()
+                            .map(|(provider, default_model)| {
+                                let active = draft.ai.provider.eq_ignore_ascii_case(provider);
+                                let prov_owned = provider.to_string();
+                                let model_owned = default_model.to_string();
+                                pill_button(
+                                    format!("provider-{provider}"),
+                                    provider,
+                                    active,
+                                    palette,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.draft_config.ai.provider = prov_owned.clone();
+                                        this.draft_config.ai.model = model_owned.clone();
+                                        cx.notify();
+                                    }),
+                                )
+                            }),
+                        ),
+                    ))
+                    // Approval mode selector
+                    .child(setting_row(
+                        "AI Approval",
+                        palette,
+                        div().flex().gap(px(6.0)).children(
+                            [
+                                ("Default (Ask)", ApprovalMode::Default),
+                                ("Auto", ApprovalMode::Auto),
+                            ]
+                            .into_iter()
+                            .map(|(label, mode)| {
+                                let active = draft.ai.approval_mode == mode;
+                                pill_button(
+                                    format!("approval-{label}"),
+                                    label,
+                                    active,
+                                    palette,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.draft_config.ai.approval_mode = mode;
+                                        cx.notify();
+                                    }),
+                                )
+                            }),
+                        ),
+                    ))
+                    // Keyring API key status + paste from clipboard
+                    .child(setting_row("API Key", palette, {
+                        let provider_name = draft.ai.provider.clone();
+                        let configured = load_api_key(&provider_name).ok().flatten().is_some();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(to_hsla(
+                                        if configured {
+                                            RgbColor::new(0xa6, 0xe3, 0xa1)
+                                        } else {
+                                            palette.muted
+                                        },
+                                        1.0,
+                                    ))
+                                    .child(if provider_name.eq_ignore_ascii_case("ollama") {
+                                        "Local (no key)"
+                                    } else if configured {
+                                        "Keyring: Configured"
+                                    } else {
+                                        "Keyring: Not set"
+                                    }),
+                            )
+                            .child(top_bar_button(
+                                "paste-api-key-btn",
+                                "Set from Clipboard",
+                                !provider_name.eq_ignore_ascii_case("ollama"),
+                                palette,
+                                cx.listener(move |this, _, _, cx| {
+                                    let prov = this.draft_config.ai.provider.clone();
+                                    if let Some(item) = cx.read_from_clipboard()
+                                        && let Some(key) = item.text()
+                                    {
+                                        let trimmed = key.trim();
+                                        if !trimmed.is_empty() {
+                                            match store_api_key(&prov, trimmed) {
+                                                Ok(()) => {
+                                                    this.settings_status = Some(format!(
+                                                        "Stored {prov} key in OS keychain"
+                                                    ));
+                                                }
+                                                Err(err) => {
+                                                    this.settings_status =
+                                                        Some(format!("Keyring error: {err}"));
+                                                }
+                                            }
+                                            cx.notify();
+                                        }
+                                    }
+                                }),
+                            ))
+                    }))
                     // Footer actions
                     .child(
                         div()
@@ -1076,6 +1378,42 @@ impl Render for TerminalCanvasView {
                     ),
             );
 
+        if let Some(block) = &self.ai_block {
+            let colors = AiBlockColors {
+                bg: palette.bg,
+                surface: palette.surface,
+                border: palette.border,
+                fg: palette.fg,
+                muted: palette.muted,
+                accent: palette.accent,
+            };
+            root = root.child(render_ai_block(
+                block,
+                colors,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(mut b) = this.ai_block.take() {
+                        b.resolve_approval(false);
+                    }
+                    this.agent_rx = None;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _, cx| {
+                    if let Some(b) = this.ai_block.as_mut() {
+                        b.resolve_approval(true);
+                    }
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _, cx| {
+                    if let Some(b) = this.ai_block.as_mut() {
+                        b.resolve_approval(false);
+                    }
+                    cx.notify();
+                }),
+            ));
+        }
+
+        root = root.child(self.render_status_bar(palette, cx));
+
         if let Some(menu) = &self.context_menu {
             root = root.child(self.render_context_menu(menu, palette, cx));
         }
@@ -1085,6 +1423,123 @@ impl Render for TerminalCanvasView {
         }
 
         root
+    }
+}
+
+impl TerminalCanvasView {
+    fn render_status_bar(&self, palette: ThemePalette, cx: &mut Context<Self>) -> impl IntoElement {
+        let env = self
+            .env_snapshot
+            .lock()
+            .expect("env_snapshot lock poisoned")
+            .clone();
+        let failed_code = *self
+            .last_failed_exit
+            .lock()
+            .expect("last_failed_exit lock poisoned");
+        let cfg = self.config_store.get();
+
+        let mut left = div().flex().items_center().gap(px(10.0));
+        if let Some(git) = &env.git {
+            let label = if git.dirty {
+                format!("git:{}*", git.branch)
+            } else {
+                format!("git:{}", git.branch)
+            };
+            left = left.child(
+                div()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .bg(to_hsla(palette.accent, 0.14))
+                    .text_size(px(11.0))
+                    .text_color(to_hsla(palette.accent, 1.0))
+                    .child(label),
+            );
+        }
+
+        for tool in env.toolchains.iter().take(3) {
+            let text = match &tool.version {
+                Some(v) => format!("{} {}", tool.name, v),
+                None => tool.name.to_string(),
+            };
+            left = left.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(to_hsla(palette.muted, 1.0))
+                    .child(text),
+            );
+        }
+
+        if let Some(code) = failed_code {
+            left = left.child(
+                div()
+                    .id("ask-ai-fix-btn")
+                    .px(px(7.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .bg(to_hsla(RgbColor::new(0xf3, 0x8b, 0xa8), 0.16))
+                    .text_size(px(11.0))
+                    .text_color(to_hsla(RgbColor::new(0xf3, 0x8b, 0xa8), 1.0))
+                    .child(format!("Exit {code} — Ask AI to fix?"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        *this
+                            .last_failed_exit
+                            .lock()
+                            .expect("last_failed_exit lock poisoned") = None;
+                        this.spawn_agent_turn(
+                            format!("The previous command exited with code {code}. Diagnose and suggest a fix."),
+                            cx,
+                        );
+                    })),
+            );
+        }
+
+        let mode_color = match self.input_mode {
+            InputMode::Ai => RgbColor::new(0xa6, 0xe3, 0xa1),
+            InputMode::Shell | InputMode::Auto => palette.accent,
+        };
+
+        div()
+            .h(px(STATUS_BAR_HEIGHT))
+            .w_full()
+            .px(px(12.0))
+            .bg(to_hsla(palette.surface, 1.0))
+            .border_t_1()
+            .border_color(to_hsla(palette.border, 1.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(left)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(to_hsla(palette.muted, 1.0))
+                            .child(format!("{}:{}", cfg.ai.provider, cfg.ai.model)),
+                    )
+                    .child(
+                        div()
+                            .id("mode-toggle-pill")
+                            .px(px(7.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(to_hsla(mode_color, 0.7))
+                            .bg(to_hsla(mode_color, 0.16))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(to_hsla(mode_color, 1.0))
+                            .child(format!("[{}]", self.input_mode.label()))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
+                    ),
+            )
     }
 }
 
@@ -1388,4 +1843,27 @@ fn encode_keystroke(ks: &Keystroke) -> Option<Vec<u8>> {
     };
 
     Some(seq.to_vec())
+}
+
+fn update_line_buffer(line_buffer: &mut String, ks: &Keystroke, bytes: &[u8]) {
+    if bytes == [0x03] || bytes == [0x15] {
+        line_buffer.clear();
+        return;
+    }
+    match ks.key.as_str() {
+        "backspace" => {
+            line_buffer.pop();
+        }
+        "enter" => {
+            line_buffer.clear();
+        }
+        _ if !ks.modifiers.control && !ks.modifiers.alt && !ks.modifiers.platform => {
+            if let Ok(text) = std::str::from_utf8(bytes)
+                && !text.starts_with('\x1b')
+            {
+                line_buffer.push_str(text);
+            }
+        }
+        _ => {}
+    }
 }
