@@ -85,11 +85,6 @@ dependencies = [
 [[package]]
 name = "ace-agent"
 version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "ace-config"
@@ -107,30 +102,21 @@ dependencies = [
 [[package]]
 name = "ace-env"
 version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "ace-pty"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rust-pty",
  "thiserror 2.0.21",
  "tokio",
- "tracing",
  "unicode-normalization",
 ]
 
 [[package]]
 name = "ace-shell"
 version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
- "tracing",
-]
 
 [[package]]
 name = "ace-ui"
@@ -151,8 +137,6 @@ name = "ace-vt"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
- "thiserror 2.0.21",
- "tracing",
 ]
 
 [[package]]
