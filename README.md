@@ -14,7 +14,23 @@ The repository is organized as a seven-crate Rust workspace (Rust 2024 edition, 
 - `crates/ace-config` — Configuration loader (`config.toml`) with lock-free `ArcSwap` hot-reloading and OS keychain secret storage.
 - `crates/ace-ui` — Binary crate (`ace-term`) rendering the terminal canvas, inline AI blocks, and status bar via `gpui-kit`.
 
-For the full roadmap and technical requirements, see [SPEC.md](SPEC.md).
+For the full roadmap and technical requirements, see [SPEC.md](SPEC.md). For step-by-step guides, see [docs/tutorials](docs/tutorials/README.md).
+
+## Installation
+
+### Prebuilt Binaries
+
+**macOS & Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/princetonacelopez/ace-term/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/princetonacelopez/ace-term/main/install.ps1 | iex
+```
 
 ## Building from Source
 
@@ -70,14 +86,6 @@ size = 14.0
 line_height = 1.35
 ligatures = true
 ```
-
-## Development Workflow
-
-This project uses a standard branching model:
-
-- `main` — Stable, release-ready state.
-- `develop` — Integration branch for completed milestones and features.
-- `feat/*`, `fix/*`, `chore/*` — Short-lived working branches merged into `develop` (and promoted to `main` on milestone completion).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
