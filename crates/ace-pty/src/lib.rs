@@ -4,7 +4,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rust_pty::{NativePtySystem, PtyConfig, PtyError, PtyMaster, PtySystem};
+#[cfg(unix)]
+use rust_pty::PtyMaster;
+use rust_pty::{NativePtySystem, PtyConfig, PtyError, PtySystem};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
