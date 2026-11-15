@@ -763,10 +763,14 @@ impl TerminalCanvasView {
         div()
             .absolute()
             .inset_0()
-            .bg(to_hsla(RgbColor::new(0, 0, 0), 0.45))
+            .p(px(20.0))
+            .bg(to_hsla(RgbColor::new(0, 0, 0), 0.52))
             .flex()
             .items_center()
             .justify_center()
+            .on_scroll(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -776,8 +780,10 @@ impl TerminalCanvasView {
             )
             .child(
                 div()
-                    .w(px(560.0))
-                    .max_h(px(640.0))
+                    .w(px(620.0))
+                    .max_w_full()
+                    .max_h(relative(0.88))
+                    .overflow_hidden()
                     .p(px(18.0))
                     .rounded(px(12.0))
                     .bg(to_hsla(palette.surface, 1.0))
@@ -786,12 +792,16 @@ impl TerminalCanvasView {
                     .shadow_lg()
                     .flex()
                     .flex_col()
-                    .gap(px(14.0))
+                    .gap(px(12.0))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
                     .child(
                         div()
+                            .flex_shrink_0()
+                            .pb(px(8.0))
+                            .border_b_1()
+                            .border_color(to_hsla(palette.border, 0.7))
                             .flex()
                             .items_center()
                             .justify_between()
@@ -800,7 +810,7 @@ impl TerminalCanvasView {
                                     .text_size(px(15.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(to_hsla(palette.fg, 1.0))
-                                    .child("Terminal Settings"),
+                                    .child("Settings"),
                             )
                             .child(top_bar_button(
                                 "settings-close-x",
@@ -813,399 +823,435 @@ impl TerminalCanvasView {
                                 }),
                             )),
                     )
-                    // Theme selector
-                    .child(setting_row(
-                        "Theme",
-                        palette,
-                        div().flex().flex_wrap().gap(px(6.0)).children(
-                            ["Default Dark", "Default Light", "Dracula", "Nord"]
-                                .into_iter()
-                                .map(|theme| {
-                                    let active = draft.ui.theme.eq_ignore_ascii_case(theme);
-                                    let theme_owned = theme.to_string();
-                                    pill_button(
-                                        format!("theme-{theme}"),
-                                        theme,
-                                        active,
-                                        palette,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.draft_config.ui.theme = theme_owned.clone();
-                                            cx.notify();
+                    .child(
+                        div()
+                            .id("settings-scroll-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .pr(px(4.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .child(section_header("Appearance", palette))
+                            // Theme selector
+                            .child(setting_row(
+                                "Theme",
+                                palette,
+                                div().flex().flex_wrap().gap(px(6.0)).children(
+                                    ["Default Dark", "Default Light", "Dracula", "Nord"]
+                                        .into_iter()
+                                        .map(|theme| {
+                                            let active = draft.ui.theme.eq_ignore_ascii_case(theme);
+                                            let theme_owned = theme.to_string();
+                                            pill_button(
+                                                format!("theme-{theme}"),
+                                                theme,
+                                                active,
+                                                palette,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.draft_config.ui.theme =
+                                                        theme_owned.clone();
+                                                    cx.notify();
+                                                }),
+                                            )
                                         }),
-                                    )
-                                }),
-                        ),
-                    ))
-                    // Font family selector
-                    .child(setting_row(
-                        "Font Family",
-                        palette,
-                        div().flex().flex_wrap().gap(px(6.0)).children(
-                            available_fonts.into_iter().take(4).map(|fam| {
-                                let active = draft.font.family.eq_ignore_ascii_case(&fam);
-                                let fam_clone = fam.clone();
-                                pill_button(
-                                    format!("font-{fam}"),
-                                    &fam,
-                                    active,
-                                    palette,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.draft_config.font.family = fam_clone.clone();
-                                        cx.notify();
-                                    }),
-                                )
-                            }),
-                        ),
-                    ))
-                    // Font size stepper
-                    .child(setting_row(
-                        "Font Size",
-                        palette,
-                        stepper(
-                            "font-size",
-                            format!("{:.0} px", draft.font.size),
-                            palette,
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.font.size =
-                                    (this.draft_config.font.size - 1.0).max(9.0);
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.font.size =
-                                    (this.draft_config.font.size + 1.0).min(32.0);
-                                cx.notify();
-                            }),
-                        ),
-                    ))
-                    // Line height stepper
-                    .child(setting_row(
-                        "Line Height",
-                        palette,
-                        stepper(
-                            "line-height",
-                            format!("{:.2}", draft.font.line_height),
-                            palette,
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.font.line_height =
-                                    ((this.draft_config.font.line_height - 0.05) * 100.0).round()
-                                        / 100.0;
-                                this.draft_config.font.line_height =
-                                    this.draft_config.font.line_height.max(1.0);
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.font.line_height =
-                                    ((this.draft_config.font.line_height + 0.05) * 100.0).round()
-                                        / 100.0;
-                                this.draft_config.font.line_height =
-                                    this.draft_config.font.line_height.min(2.0);
-                                cx.notify();
-                            }),
-                        ),
-                    ))
-                    // Cursor style selector
-                    .child(setting_row(
-                        "Cursor Style",
-                        palette,
-                        div().flex().gap(px(6.0)).children(
-                            [
-                                ("Block", CursorStyle::Block),
-                                ("Bar", CursorStyle::Bar),
-                                ("Underline", CursorStyle::Underline),
-                            ]
-                            .into_iter()
-                            .map(|(label, style)| {
-                                let active = draft.terminal.cursor_style == style;
-                                pill_button(
-                                    format!("cursor-{label}"),
-                                    label,
-                                    active,
-                                    palette,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.draft_config.terminal.cursor_style = style;
-                                        cx.notify();
-                                    }),
-                                )
-                            }),
-                        ),
-                    ))
-                    // Padding stepper
-                    .child(setting_row(
-                        "Padding",
-                        palette,
-                        stepper(
-                            "padding",
-                            format!("{} px", draft.ui.padding),
-                            palette,
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.ui.padding =
-                                    this.draft_config.ui.padding.saturating_sub(2);
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.ui.padding =
-                                    (this.draft_config.ui.padding + 2).min(32);
-                                cx.notify();
-                            }),
-                        ),
-                    ))
-                    // Opacity stepper
-                    .child(setting_row(
-                        "Opacity",
-                        palette,
-                        stepper(
-                            "opacity",
-                            format!("{:.0}%", draft.ui.opacity * 100.0),
-                            palette,
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.ui.opacity =
-                                    ((this.draft_config.ui.opacity - 0.05) * 100.0).round() / 100.0;
-                                this.draft_config.ui.opacity =
-                                    this.draft_config.ui.opacity.max(0.6);
-                                cx.notify();
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.draft_config.ui.opacity =
-                                    ((this.draft_config.ui.opacity + 0.05) * 100.0).round() / 100.0;
-                                this.draft_config.ui.opacity =
-                                    this.draft_config.ui.opacity.min(1.0);
-                                cx.notify();
-                            }),
-                        ),
-                    ))
-                    // AI Provider selector
-                    .child({
-                        let discovered = self
-                            .discovered_providers
-                            .lock()
-                            .expect("discovered_providers lock poisoned")
-                            .clone();
-                        let discovering = self.discovering_ai.load(Ordering::Acquire);
-                        let provider_buttons: Vec<(String, String, String)> = if discovered
-                            .is_empty()
-                        {
-                            vec![
-                                (
-                                    "antigravity".to_string(),
-                                    "Antigravity".to_string(),
-                                    "gemini-4-argon-medium".to_string(),
                                 ),
-                                (
-                                    "anthropic".to_string(),
-                                    "Anthropic".to_string(),
-                                    "claude-sonnet-4-6".to_string(),
-                                ),
-                                (
-                                    "openai".to_string(),
-                                    "OpenAI".to_string(),
-                                    "gpt-4o".to_string(),
-                                ),
-                            ]
-                        } else {
-                            discovered
-                                .iter()
-                                .map(|p| {
-                                    let badge = if p.local && p.installed {
-                                        format!("{} (Local)", p.label)
-                                    } else if p.local {
-                                        format!("{} (Not found)", p.label)
-                                    } else {
-                                        p.label.clone()
-                                    };
-                                    let default_model =
-                                        p.models.first().map(|m| m.id.clone()).unwrap_or_default();
-                                    (p.id.clone(), badge, default_model)
-                                })
-                                .collect()
-                        };
-
-                        setting_row(
-                            "AI Provider",
-                            palette,
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(px(6.0))
-                                .children(provider_buttons.into_iter().map(
-                                    |(provider, label, default_model)| {
-                                        let active =
-                                            draft.ai.provider.eq_ignore_ascii_case(&provider);
-                                        let prov_owned = provider.clone();
-                                        let model_owned = default_model;
+                            ))
+                            // Font family selector
+                            .child(setting_row(
+                                "Font Family",
+                                palette,
+                                div().flex().flex_wrap().gap(px(6.0)).children(
+                                    available_fonts.into_iter().take(4).map(|fam| {
+                                        let active = draft.font.family.eq_ignore_ascii_case(&fam);
+                                        let fam_clone = fam.clone();
                                         pill_button(
-                                            format!("provider-{provider}"),
-                                            &label,
+                                            format!("font-{fam}"),
+                                            &fam,
                                             active,
                                             palette,
                                             cx.listener(move |this, _, _, cx| {
-                                                this.draft_config.ai.provider = prov_owned.clone();
-                                                if !model_owned.is_empty() {
-                                                    this.draft_config.ai.model =
-                                                        model_owned.clone();
-                                                }
+                                                this.draft_config.font.family = fam_clone.clone();
                                                 cx.notify();
                                             }),
                                         )
-                                    },
-                                ))
-                                .child(top_bar_button(
-                                    "refresh-ai-btn",
-                                    if discovering {
-                                        "Scanning..."
-                                    } else {
-                                        "Refresh"
-                                    },
-                                    !discovering,
+                                    }),
+                                ),
+                            ))
+                            // Font size stepper
+                            .child(setting_row(
+                                "Font Size",
+                                palette,
+                                stepper(
+                                    "font-size",
+                                    format!("{:.0} px", draft.font.size),
                                     palette,
                                     cx.listener(|this, _, _, cx| {
-                                        this.refresh_ai_discovery();
+                                        this.draft_config.font.size =
+                                            (this.draft_config.font.size - 1.0).max(9.0);
                                         cx.notify();
                                     }),
-                                )),
-                        )
-                    })
-                    .child({
-                        let discovered = self
-                            .discovered_providers
-                            .lock()
-                            .expect("discovered_providers lock poisoned")
-                            .clone();
-                        let discovering = self.discovering_ai.load(Ordering::Acquire);
-                        let active_provider = discovered
-                            .iter()
-                            .find(|p| p.id.eq_ignore_ascii_case(&draft.ai.provider))
-                            .cloned();
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.font.size =
+                                            (this.draft_config.font.size + 1.0).min(32.0);
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            // Line height stepper
+                            .child(setting_row(
+                                "Line Height",
+                                palette,
+                                stepper(
+                                    "line-height",
+                                    format!("{:.2}", draft.font.line_height),
+                                    palette,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.font.line_height =
+                                            ((this.draft_config.font.line_height - 0.05) * 100.0)
+                                                .round()
+                                                / 100.0;
+                                        this.draft_config.font.line_height =
+                                            this.draft_config.font.line_height.max(1.0);
+                                        cx.notify();
+                                    }),
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.font.line_height =
+                                            ((this.draft_config.font.line_height + 0.05) * 100.0)
+                                                .round()
+                                                / 100.0;
+                                        this.draft_config.font.line_height =
+                                            this.draft_config.font.line_height.min(2.0);
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            // Cursor style selector
+                            .child(setting_row(
+                                "Cursor Style",
+                                palette,
+                                div().flex().gap(px(6.0)).children(
+                                    [
+                                        ("Block", CursorStyle::Block),
+                                        ("Bar", CursorStyle::Bar),
+                                        ("Underline", CursorStyle::Underline),
+                                    ]
+                                    .into_iter()
+                                    .map(|(label, style)| {
+                                        let active = draft.terminal.cursor_style == style;
+                                        pill_button(
+                                            format!("cursor-{label}"),
+                                            label,
+                                            active,
+                                            palette,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.draft_config.terminal.cursor_style = style;
+                                                cx.notify();
+                                            }),
+                                        )
+                                    }),
+                                ),
+                            ))
+                            // Padding stepper
+                            .child(setting_row(
+                                "Padding",
+                                palette,
+                                stepper(
+                                    "padding",
+                                    format!("{} px", draft.ui.padding),
+                                    palette,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.ui.padding =
+                                            this.draft_config.ui.padding.saturating_sub(2);
+                                        cx.notify();
+                                    }),
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.ui.padding =
+                                            (this.draft_config.ui.padding + 2).min(32);
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            // Opacity stepper
+                            .child(setting_row(
+                                "Opacity",
+                                palette,
+                                stepper(
+                                    "opacity",
+                                    format!("{:.0}%", draft.ui.opacity * 100.0),
+                                    palette,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.ui.opacity =
+                                            ((this.draft_config.ui.opacity - 0.05) * 100.0).round()
+                                                / 100.0;
+                                        this.draft_config.ui.opacity =
+                                            this.draft_config.ui.opacity.max(0.6);
+                                        cx.notify();
+                                    }),
+                                    cx.listener(|this, _, _, cx| {
+                                        this.draft_config.ui.opacity =
+                                            ((this.draft_config.ui.opacity + 0.05) * 100.0).round()
+                                                / 100.0;
+                                        this.draft_config.ui.opacity =
+                                            this.draft_config.ui.opacity.min(1.0);
+                                        cx.notify();
+                                    }),
+                                ),
+                            ))
+                            // AI Provider selector
+                            .child(section_header("AI & Models", palette))
+                            .child({
+                                let discovered = self
+                                    .discovered_providers
+                                    .lock()
+                                    .expect("discovered_providers lock poisoned")
+                                    .clone();
+                                let discovering = self.discovering_ai.load(Ordering::Acquire);
+                                let provider_buttons: Vec<(String, String, String)> =
+                                    if discovered.is_empty() {
+                                        vec![
+                                            (
+                                                "antigravity".to_string(),
+                                                "Antigravity".to_string(),
+                                                "gemini-4-argon-medium".to_string(),
+                                            ),
+                                            (
+                                                "anthropic".to_string(),
+                                                "Anthropic".to_string(),
+                                                "claude-sonnet-4-6".to_string(),
+                                            ),
+                                            (
+                                                "openai".to_string(),
+                                                "OpenAI".to_string(),
+                                                "gpt-4o".to_string(),
+                                            ),
+                                        ]
+                                    } else {
+                                        discovered
+                                            .iter()
+                                            .map(|p| {
+                                                let badge = if p.local && p.installed {
+                                                    format!("{} (Local)", p.label)
+                                                } else if p.local {
+                                                    format!("{} (Not found)", p.label)
+                                                } else {
+                                                    p.label.clone()
+                                                };
+                                                let default_model = p
+                                                    .models
+                                                    .first()
+                                                    .map(|m| m.id.clone())
+                                                    .unwrap_or_default();
+                                                (p.id.clone(), badge, default_model)
+                                            })
+                                            .collect()
+                                    };
 
-                        let model_content = match active_provider {
-                            Some(p) if !p.models.is_empty() => div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(4.0))
-                                .children(p.models.into_iter().map(|m| {
-                                    let active = draft.ai.model == m.id;
-                                    let model_id = m.id.clone();
-                                    pill_button(
-                                        format!("model-{}", m.id),
-                                        &m.label,
-                                        active,
+                                setting_row(
+                                    "AI Provider",
+                                    palette,
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .justify_end()
+                                        .gap(px(6.0))
+                                        .children(provider_buttons.into_iter().map(
+                                            |(provider, label, default_model)| {
+                                                let active = draft
+                                                    .ai
+                                                    .provider
+                                                    .eq_ignore_ascii_case(&provider);
+                                                let prov_owned = provider.clone();
+                                                let model_owned = default_model;
+                                                pill_button(
+                                                    format!("provider-{provider}"),
+                                                    &label,
+                                                    active,
+                                                    palette,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.draft_config.ai.provider =
+                                                            prov_owned.clone();
+                                                        if !model_owned.is_empty() {
+                                                            this.draft_config.ai.model =
+                                                                model_owned.clone();
+                                                        }
+                                                        cx.notify();
+                                                    }),
+                                                )
+                                            },
+                                        ))
+                                        .child(top_bar_button(
+                                            "refresh-ai-btn",
+                                            if discovering {
+                                                "Scanning..."
+                                            } else {
+                                                "Refresh"
+                                            },
+                                            !discovering,
+                                            palette,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.refresh_ai_discovery();
+                                                cx.notify();
+                                            }),
+                                        )),
+                                )
+                            })
+                            .child({
+                                let discovered = self
+                                    .discovered_providers
+                                    .lock()
+                                    .expect("discovered_providers lock poisoned")
+                                    .clone();
+                                let discovering = self.discovering_ai.load(Ordering::Acquire);
+                                let active_provider = discovered
+                                    .iter()
+                                    .find(|p| p.id.eq_ignore_ascii_case(&draft.ai.provider))
+                                    .cloned();
+
+                                let model_content = match active_provider {
+                                    Some(p) if !p.models.is_empty() => div()
+                                        .id("ai-models-scroll")
+                                        .w_full()
+                                        .max_h(px(150.0))
+                                        .overflow_y_scroll()
+                                        .p(px(6.0))
+                                        .rounded(px(8.0))
+                                        .bg(to_hsla(palette.bg, 0.55))
+                                        .border_1()
+                                        .border_color(to_hsla(palette.border, 0.7))
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(5.0))
+                                        .children(p.models.into_iter().map(|m| {
+                                            let active = draft.ai.model == m.id;
+                                            let model_id = m.id.clone();
+                                            pill_button(
+                                                format!("model-{}", m.id),
+                                                &m.label,
+                                                active,
+                                                palette,
+                                                cx.listener(move |this, _, _, cx| {
+                                                    this.draft_config.ai.model = model_id.clone();
+                                                    cx.notify();
+                                                }),
+                                            )
+                                        }))
+                                        .into_any_element(),
+                                    Some(p) => div()
+                                        .text_size(px(11.0))
+                                        .text_color(to_hsla(palette.muted, 1.0))
+                                        .child(if discovering {
+                                            "Scanning local models...".to_string()
+                                        } else {
+                                            format!("No models listed ({})", p.detail)
+                                        })
+                                        .into_any_element(),
+                                    None => div()
+                                        .text_size(px(11.0))
+                                        .text_color(to_hsla(palette.muted, 1.0))
+                                        .child(if discovering {
+                                            "Detecting local AI & models...".to_string()
+                                        } else {
+                                            draft.ai.model.clone()
+                                        })
+                                        .into_any_element(),
+                                };
+
+                                setting_row("AI Model", palette, model_content)
+                            })
+                            // Approval mode selector
+                            .child(setting_row(
+                                "AI Approval",
+                                palette,
+                                div().flex().gap(px(6.0)).children(
+                                    [
+                                        ("Default (Ask)", ApprovalMode::Default),
+                                        ("Auto", ApprovalMode::Auto),
+                                    ]
+                                    .into_iter()
+                                    .map(|(label, mode)| {
+                                        let active = draft.ai.approval_mode == mode;
+                                        pill_button(
+                                            format!("approval-{label}"),
+                                            label,
+                                            active,
+                                            palette,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.draft_config.ai.approval_mode = mode;
+                                                cx.notify();
+                                            }),
+                                        )
+                                    }),
+                                ),
+                            ))
+                            // Keyring API key status + paste from clipboard
+                            .child(setting_row("API Key", palette, {
+                                let provider_name = draft.ai.provider.clone();
+                                let local_provider = is_local_provider(&provider_name);
+                                let configured = !local_provider
+                                    && load_api_key(&provider_name).ok().flatten().is_some();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(to_hsla(
+                                                if local_provider || configured {
+                                                    RgbColor::new(0xa6, 0xe3, 0xa1)
+                                                } else {
+                                                    palette.muted
+                                                },
+                                                1.0,
+                                            ))
+                                            .child(if local_provider {
+                                                "Local (no key required)"
+                                            } else if configured {
+                                                "Keyring: Configured"
+                                            } else {
+                                                "Keyring: Not set"
+                                            }),
+                                    )
+                                    .child(top_bar_button(
+                                        "paste-api-key-btn",
+                                        "Set from Clipboard",
+                                        !local_provider,
                                         palette,
                                         cx.listener(move |this, _, _, cx| {
-                                            this.draft_config.ai.model = model_id.clone();
-                                            cx.notify();
-                                        }),
-                                    )
-                                }))
-                                .into_any_element(),
-                            Some(p) => div()
-                                .text_size(px(11.0))
-                                .text_color(to_hsla(palette.muted, 1.0))
-                                .child(if discovering {
-                                    "Scanning local models...".to_string()
-                                } else {
-                                    format!("No models listed ({})", p.detail)
-                                })
-                                .into_any_element(),
-                            None => div()
-                                .text_size(px(11.0))
-                                .text_color(to_hsla(palette.muted, 1.0))
-                                .child(if discovering {
-                                    "Detecting local AI & models...".to_string()
-                                } else {
-                                    draft.ai.model.clone()
-                                })
-                                .into_any_element(),
-                        };
-
-                        setting_row("AI Model", palette, model_content)
-                    })
-                    // Approval mode selector
-                    .child(setting_row(
-                        "AI Approval",
-                        palette,
-                        div().flex().gap(px(6.0)).children(
-                            [
-                                ("Default (Ask)", ApprovalMode::Default),
-                                ("Auto", ApprovalMode::Auto),
-                            ]
-                            .into_iter()
-                            .map(|(label, mode)| {
-                                let active = draft.ai.approval_mode == mode;
-                                pill_button(
-                                    format!("approval-{label}"),
-                                    label,
-                                    active,
-                                    palette,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.draft_config.ai.approval_mode = mode;
-                                        cx.notify();
-                                    }),
-                                )
-                            }),
-                        ),
-                    ))
-                    // Keyring API key status + paste from clipboard
-                    .child(setting_row("API Key", palette, {
-                        let provider_name = draft.ai.provider.clone();
-                        let local_provider = is_local_provider(&provider_name);
-                        let configured = !local_provider
-                            && load_api_key(&provider_name).ok().flatten().is_some();
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(to_hsla(
-                                        if local_provider || configured {
-                                            RgbColor::new(0xa6, 0xe3, 0xa1)
-                                        } else {
-                                            palette.muted
-                                        },
-                                        1.0,
-                                    ))
-                                    .child(if local_provider {
-                                        "Local (no key required)"
-                                    } else if configured {
-                                        "Keyring: Configured"
-                                    } else {
-                                        "Keyring: Not set"
-                                    }),
-                            )
-                            .child(top_bar_button(
-                                "paste-api-key-btn",
-                                "Set from Clipboard",
-                                !local_provider,
-                                palette,
-                                cx.listener(move |this, _, _, cx| {
-                                    let prov = this.draft_config.ai.provider.clone();
-                                    if let Some(item) = cx.read_from_clipboard()
-                                        && let Some(key) = item.text()
-                                    {
-                                        let trimmed = key.trim();
-                                        if !trimmed.is_empty() {
-                                            match store_api_key(&prov, trimmed) {
-                                                Ok(()) => {
-                                                    this.settings_status = Some(format!(
-                                                        "Stored {prov} key in OS keychain"
-                                                    ));
-                                                }
-                                                Err(err) => {
-                                                    this.settings_status =
-                                                        Some(format!("Keyring error: {err}"));
+                                            let prov = this.draft_config.ai.provider.clone();
+                                            if let Some(item) = cx.read_from_clipboard()
+                                                && let Some(key) = item.text()
+                                            {
+                                                let trimmed = key.trim();
+                                                if !trimmed.is_empty() {
+                                                    match store_api_key(&prov, trimmed) {
+                                                        Ok(()) => {
+                                                            this.settings_status = Some(format!(
+                                                                "Stored {prov} key in OS keychain"
+                                                            ));
+                                                        }
+                                                        Err(err) => {
+                                                            this.settings_status = Some(format!(
+                                                                "Keyring error: {err}"
+                                                            ));
+                                                        }
+                                                    }
+                                                    cx.notify();
                                                 }
                                             }
-                                            cx.notify();
-                                        }
-                                    }
-                                }),
-                            ))
-                    }))
+                                        }),
+                                    ))
+                            })),
+                    )
                     // Footer actions
                     .child(
                         div()
-                            .pt(px(6.0))
+                            .flex_shrink_0()
+                            .pt(px(8.0))
                             .border_t_1()
                             .border_color(to_hsla(palette.border, 1.0))
                             .flex()
@@ -1853,24 +1899,39 @@ fn context_menu_item(
     el
 }
 
+fn section_header(title: &'static str, palette: ThemePalette) -> impl IntoElement {
+    div()
+        .pt(px(4.0))
+        .pb(px(2.0))
+        .border_b_1()
+        .border_color(to_hsla(palette.border, 0.5))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(to_hsla(palette.accent, 1.0))
+        .child(title)
+}
+
 fn setting_row(
     label: &'static str,
     palette: ThemePalette,
     control: impl IntoElement,
 ) -> impl IntoElement {
     div()
+        .w_full()
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
         .gap(px(12.0))
         .child(
             div()
-                .w(px(110.0))
+                .w(px(108.0))
+                .flex_shrink_0()
+                .pt(px(4.0))
                 .text_size(px(12.0))
                 .text_color(to_hsla(palette.muted, 1.0))
                 .child(label),
         )
-        .child(div().flex_1().flex().justify_end().child(control))
+        .child(div().flex_1().min_w_0().flex().justify_end().child(control))
 }
 
 fn pill_button<T: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
