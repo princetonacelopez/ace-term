@@ -860,8 +860,17 @@ impl Render for TerminalCanvasView {
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
-                            this.selecting = false;
+                        cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                            if this.selecting {
+                                let padding = this.config_store.get().ui.padding as f32;
+                                let (col, row) = this.pixel_to_cell(event.position, padding);
+                                this.vt
+                                    .lock()
+                                    .expect("vt lock poisoned")
+                                    .finish_selection(col, row);
+                                this.selecting = false;
+                                cx.notify();
+                            }
                         }),
                     )
                     .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
