@@ -59,11 +59,11 @@ fn main() {
                 size(px(1080.0), px(720.0)),
                 cx,
             ))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Ace Term".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+            window_min_size: Some(size(px(480.0), px(320.0))),
+            is_resizable: true,
+            is_minimizable: true,
+            app_id: Some("ace-term".to_string()),
+            ..gpui_kit::component::TitleBar::window_options()
         };
 
         gpui_kit::open_window(options, cx, move |window, cx| {

@@ -130,6 +130,8 @@ pub trait TerminalGrid {
     fn start_selection(&mut self, col: usize, row: usize, kind: SelectionType);
     /// Updates the active text selection to viewport `(col, row)`.
     fn update_selection(&mut self, col: usize, row: usize);
+    /// Completes an active selection; clears it if no drag occurred.
+    fn finish_selection(&mut self, col: usize, row: usize);
     /// Clears any active text selection.
     fn clear_selection(&mut self);
     /// Returns the currently selected text, if any.
@@ -205,6 +207,7 @@ pub struct VtTerminal {
     event_rx: mpsc::Receiver<VtEvent>,
     sync: Dec2026State,
     dirty: bool,
+    selection_origin: Option<(usize, usize, SelectionType)>,
 }
 
 impl VtTerminal {
@@ -224,14 +227,22 @@ impl VtTerminal {
             event_rx,
             sync: Dec2026State::default(),
             dirty: true,
+            selection_origin: None,
         }
     }
 
+    fn clamp_coords(&self, col: usize, row: usize) -> (usize, usize) {
+        (
+            col.min(self.size.cols.saturating_sub(1)),
+            row.min(self.size.rows.saturating_sub(1)),
+        )
+    }
+
     fn viewport_point(&self, col: usize, row: usize) -> Point {
+        let (col, row) = self.clamp_coords(col, row);
         let offset = self.term.grid().display_offset() as i32;
         let line = Line(row as i32 - offset);
-        let col = Column(col.min(self.size.cols.saturating_sub(1)));
-        Point::new(line, col)
+        Point::new(line, Column(col))
     }
 }
 
@@ -308,7 +319,7 @@ impl TerminalGrid for VtTerminal {
                 .is_some_and(|sel| sel.contains_cell(&indexed, cursor_point, content.cursor.shape));
 
             let (mut fg, mut bg) = (resolve_color(cell.fg), resolve_color(cell.bg));
-            if cell.flags.contains(CellFlags::INVERSE) || selected {
+            if cell.flags.contains(CellFlags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
 
@@ -350,20 +361,43 @@ impl TerminalGrid for VtTerminal {
     }
 
     fn start_selection(&mut self, col: usize, row: usize, kind: SelectionType) {
+        let (col, row) = self.clamp_coords(col, row);
         let point = self.viewport_point(col, row);
+        self.selection_origin = Some((col, row, kind));
         self.term.selection = Some(Selection::new(kind, point, Side::Left));
         self.dirty = true;
     }
 
     fn update_selection(&mut self, col: usize, row: usize) {
+        let (col, row) = self.clamp_coords(col, row);
         let point = self.viewport_point(col, row);
-        if let Some(sel) = self.term.selection.as_mut() {
-            sel.update(point, Side::Right);
+        if let Some((orig_col, orig_row, kind)) = self.selection_origin {
+            let origin_point = self.viewport_point(orig_col, orig_row);
+            let (origin_side, end_side) = if (row, col) < (orig_row, orig_col) {
+                (Side::Right, Side::Left)
+            } else {
+                (Side::Left, Side::Right)
+            };
+            let mut sel = Selection::new(kind, origin_point, origin_side);
+            sel.update(point, end_side);
+            self.term.selection = Some(sel);
             self.dirty = true;
         }
     }
 
+    fn finish_selection(&mut self, col: usize, row: usize) {
+        let (col, row) = self.clamp_coords(col, row);
+        if let Some((orig_col, orig_row, _)) = self.selection_origin
+            && (orig_col, orig_row) == (col, row)
+        {
+            self.term.selection = None;
+            self.dirty = true;
+        }
+        self.selection_origin = None;
+    }
+
     fn clear_selection(&mut self) {
+        self.selection_origin = None;
         if self.term.selection.take().is_some() {
             self.dirty = true;
         }
@@ -510,5 +544,54 @@ mod tests {
         let mut vt = VtTerminal::new(TerminalSize::new(80, 24), 1000);
         vt.resize(TerminalSize::new(120, 40));
         assert_eq!(vt.size(), TerminalSize::new(120, 40));
+    }
+
+    #[test]
+    fn forward_selection_extracts_text_and_marks_cells() {
+        let mut vt = VtTerminal::new(TerminalSize::new(80, 24), 1000);
+        vt.feed_bytes(b"hello ace-term");
+        vt.start_selection(6, 0, SelectionType::Simple);
+        vt.update_selection(13, 0);
+        vt.finish_selection(13, 0);
+        assert_eq!(vt.selection_text().as_deref(), Some("ace-term"));
+        let snap = vt.snapshot();
+        let selected_cols: Vec<usize> = snap
+            .cells
+            .iter()
+            .filter(|c| c.row == 0 && c.selected)
+            .map(|c| c.col)
+            .collect();
+        assert_eq!(selected_cols, vec![6, 7, 8, 9, 10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn backward_selection_extracts_text_and_marks_cells() {
+        let mut vt = VtTerminal::new(TerminalSize::new(80, 24), 1000);
+        vt.feed_bytes(b"hello ace-term");
+        vt.start_selection(13, 0, SelectionType::Simple);
+        vt.update_selection(6, 0);
+        vt.finish_selection(6, 0);
+        assert_eq!(vt.selection_text().as_deref(), Some("ace-term"));
+    }
+
+    #[test]
+    fn single_click_without_drag_clears_selection_on_finish() {
+        let mut vt = VtTerminal::new(TerminalSize::new(80, 24), 1000);
+        vt.feed_bytes(b"hello ace-term");
+        vt.start_selection(3, 0, SelectionType::Simple);
+        vt.finish_selection(3, 0);
+        assert!(vt.selection_text().is_none());
+        let snap = vt.snapshot();
+        assert!(snap.cells.iter().all(|c| !c.selected));
+    }
+
+    #[test]
+    fn selection_clamps_out_of_bounds_coordinates() {
+        let mut vt = VtTerminal::new(TerminalSize::new(20, 5), 1000);
+        vt.feed_bytes(b"test line");
+        vt.start_selection(0, 0, SelectionType::Simple);
+        vt.update_selection(500, 500);
+        vt.finish_selection(500, 500);
+        assert!(vt.selection_text().is_some());
     }
 }

@@ -9,7 +9,7 @@ use gpui_kit::*;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
-const TOP_BAR_HEIGHT: f32 = 38.0;
+const TOP_BAR_HEIGHT: f32 = 34.0;
 
 /// Theme palette derived from `AceConfig::ui.theme`.
 #[derive(Debug, Clone, Copy)]
@@ -374,72 +374,40 @@ impl TerminalCanvasView {
             .last_title
             .clone()
             .unwrap_or_else(|| "Shell".to_string());
-        let has_selection = self
-            .vt
-            .lock()
-            .expect("vt lock poisoned")
-            .selection_text()
-            .is_some_and(|s| !s.is_empty());
 
-        div()
-            .h(px(TOP_BAR_HEIGHT))
-            .w_full()
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .justify_between()
+        gpui_kit::component::TitleBar::new()
             .bg(to_hsla(palette.surface, 1.0))
-            .border_b_1()
             .border_color(to_hsla(palette.border, 1.0))
             .child(
                 div()
+                    .w_full()
+                    .pr(px(8.0))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .justify_between()
                     .child(
                         div()
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(6.0))
-                            .bg(to_hsla(palette.accent, 0.16))
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(to_hsla(palette.accent, 1.0))
-                            .child("Ace Term"),
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .rounded(px(6.0))
+                                    .bg(to_hsla(palette.accent, 0.16))
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(to_hsla(palette.accent, 1.0))
+                                    .child("Ace Term"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(to_hsla(palette.muted, 1.0))
+                                    .child(title_text),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(to_hsla(palette.muted, 1.0))
-                            .child(title_text),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(top_bar_button(
-                        "copy-btn",
-                        "Copy",
-                        has_selection,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.copy_selection(cx)),
-                    ))
-                    .child(top_bar_button(
-                        "paste-btn",
-                        "Paste",
-                        true,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.paste_clipboard(cx)),
-                    ))
-                    .child(top_bar_button(
-                        "clear-btn",
-                        "Clear",
-                        true,
-                        palette,
-                        cx.listener(|this, _, _, cx| this.clear_terminal(cx)),
-                    ))
                     .child(top_bar_button(
                         "settings-btn",
                         if self.settings_open {
@@ -892,8 +860,17 @@ impl Render for TerminalCanvasView {
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
-                            this.selecting = false;
+                        cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                            if this.selecting {
+                                let padding = this.config_store.get().ui.padding as f32;
+                                let (col, row) = this.pixel_to_cell(event.position, padding);
+                                this.vt
+                                    .lock()
+                                    .expect("vt lock poisoned")
+                                    .finish_selection(col, row);
+                                this.selecting = false;
+                                cx.notify();
+                            }
                         }),
                     )
                     .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
